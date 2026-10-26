@@ -225,7 +225,11 @@ globalAny.Solitaire = SOL;
 globalAny.self = globalAny;
 globalAny.getComputedStyle = () => ({
   getPropertyValue: (name: string): string => {
-    const map: Record<string, string> = { '--card-w': '79px', '--card-h': '110px', '--fan': '24px', '--gap': '8px' };
+    // 必须是纯 px / 纯数字：metrics() 用 parseFloat 读取，写成 calc() 会读不到
+    const map: Record<string, string> = {
+      '--card-w': '104px', '--card-h': '146px', '--gap': '12px',
+      '--fan-ratio': '0.24', '--fan-down-ratio': '0.18',
+    };
     return map[name] ?? '';
   },
 });
@@ -421,9 +425,67 @@ section('U8 键盘快捷键', () => {
 
 section('U9 胜利界面', () => {
   U.newGame();
-  // 直接把引擎推进到「可自动完成」状态不方便；改为验证 winSequence 的入口存在
   ok(typeof U.render === 'function', '渲染函数可用');
   ok(U.engine().phase === 'playing', '初始未胜利');
+});
+
+/* ---------- 回归用例：锁定已修掉的真实缺陷 ---------- */
+
+section('U10 废牌堆扇形（回归：翻三张时最上面那张必须最靠右）', () => {
+  U.newGame(3, lcg(5), () => 0);
+  clickCard(stockEl);                              // 翻三张模式下一次翻 3 张
+  ok(wasteEl.children.length === 3, '翻三张后废牌堆渲染出 3 张');
+  const cls = wasteEl.children.map((c: any) => c.className);
+  ok(/\bw3\b/.test(cls[0]), '最旧的一张带 w3（排最左）');
+  ok(/\bw2\b/.test(cls[1]), '中间一张带 w2');
+  ok(/\bw1\b/.test(cls[2]), '最上面的一张带 w1（排最右）——回归：以前没有 class，会和最左的牌挤在一起');
+  ok(wasteEl.children[2].dataset.top === '1', '最上面的牌标记为 top');
+
+  U.newGame(1, lcg(5), () => 0);
+  clickCard(stockEl);
+  ok(wasteEl.children.length === 1 && !/\bw[123]\b/.test(wasteEl.children[0].className),
+    '翻一张模式只有一张，且不带扇形 class');
+});
+
+section('U11 点非法目标后选中态切换（回归：不能卡在旧选中上）', () => {
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 13]], [['H', 2]], [['C', 5]]] }));
+  clickCard(colCard(0, 0));                       // 选中 K
+  ok(U.selected !== null && U.selected.loc.index === 0, '点 K 后选中第 0 列');
+  clickCard(colCard(2, 0));                       // C5：K 不能压 5 → 落不下去
+  ok(U.selected !== null && U.selected.loc.index === 2,
+    '落不下去时改选刚点的那张牌（回归：以前选中态卡在 K 上）');
+  ok(U.engine().tableauCount(0) === 1, '非法移动没有改变牌局');
+});
+
+section('U12 拖到废牌堆 / 牌库一律静默回弹（回归：以前弹错误提示）', () => {
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 13]]] }));
+  const before = U.engine().tableauCount(0);
+  toastEl.textContent = 'SENTINEL';
+  toastEl.hidden = true;
+  dragCard(colCard(0, 0), wasteEl);                // dragCard 内部会把 elementFromPoint 指向废牌堆
+  ok(U.engine().tableauCount(0) === 1, '牌没有被移走');
+  ok(before === 1 && toastEl.textContent === 'SENTINEL', '不弹错误提示，与拖到空白处行为一致');
+});
+
+section('U13 restart 与自动完成的边界', () => {
+  U.newGame(1, lcg(9), () => 0);
+  clickCard(stockEl);
+  ok(U.engine().moves === 1, '翻牌后步数 1');
+  U.restart();
+  ok(U.engine().moves === 0 && U.engine().stockCount === 24, 'restart 重新发牌并清零步数');
+  ok(U.engine().passCount === 1, 'restart 保留抽牌模式');
+
+  // 无牌可收时 autoFinishStep 返回 false
+  const stuck = SOL.Solitaire.planted({ stock: [['S', 1]], tableau: [[['S', 2]]] });
+  ok(stuck.autoFinishStep() === false, '没有合法收牌时 autoFinishStep 返回 false');
+  ok(stuck.canAutoFinish() === false, '牌库还有牌时不能自动完成');
+});
+
+section('U14 metrics 与 CSS 变量一致（回归：以前读不到 calc()）', () => {
+  const m = U.metrics();
+  ok(m.w === 104 && m.h === 146, '牌宽/牌高取自纯 px 变量');
+  ok(m.fan === 35 && m.fanDown === 26, '明牌/暗牌叠放高度按比例算出');
+  ok(m.gap === 12, '间隙取自纯 px 变量');
 });
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

@@ -17,9 +17,20 @@ const suitLabel = Solitaire.suitLabel;
 const sameLocation = Solitaire.sameLocation;
 const $ = (s) => document.querySelector(s);
 const $$ = (s, root) => (root ?? document).querySelectorAll(s);
-/* ---- 花色符号（纯文本字符，避免引入字体/图片） ---- */
-const SUIT_CHAR = { S: '♠', H: '♥', D: '♦', C: '♣' };
-const FOUND_HINT = { S: '♠', H: '♥', D: '♦', C: '♣' };
+/* ---- 花色图形：纯内联 SVG，currentColor 上色，零字体/图片 ----
+   四种花色轮廓刻意拉开差异（尖顶黑桃 vs 三叶梅花、尖角方块 vs 圆弧红桃）
+   并配四种可区分的墨色/红色，让「红黑交替」规则一眼可判。 */
+const SUIT_PATH = {
+    S: '<path d="M16 2C16 2 3 13.4 3 20.2c0 3.7 2.8 6.4 6.4 6.4 1.9 0 3.5-.8 4.5-2-.2 2.5-.8 4.3-1.7 5.8h7.6c-.9-1.5-1.5-3.3-1.7-5.8 1 1.2 2.6 2 4.5 2 3.6 0 6.4-2.7 6.4-6.4C29 13.4 16 2 16 2z"/>',
+    H: '<path d="M16 30.4C16 30.4 2 21.2 2 11.2 2 6 6.1 1.6 11.2 1.6c2.7 0 4.3 1.4 4.8 2.7.5-1.3 2.1-2.7 4.8-2.7C25.9 1.6 30 6 30 11.2c0 10-14 19.2-14 19.2z"/>',
+    D: '<path d="M16 .8c2.9 7.4 7 11.8 13.3 15.2C23 19.4 18.9 23.8 16 31.2 13.1 23.8 9 19.4 2.7 16 9 12.6 13.1 8.2 16 .8z"/>',
+    C: '<circle cx="16" cy="10" r="6.4"/><circle cx="8.3" cy="20" r="6.4"/><circle cx="23.7" cy="20" r="6.4"/>'
+        + '<path d="M14.2 31.2h3.6l-.6-9.2c.8 1.2 2.1 2 3.5 2.4-.9 2.5-1.7 4.4-2.4 5.8h-5.2c-.7-1.4-1.5-3.3-2.4-5.8 1.4-.4 2.7-1.2 3.5-2.4z"/>',
+};
+/** 花色 SVG。size 控制视觉大小，shape 用不同 class 让四种花色形态更易区分 */
+function suitSvg(suit, cls = '') {
+    return '<svg class="ps ' + cls + '" viewBox="0 0 32 32" aria-hidden="true">' + SUIT_PATH[suit] + '</svg>';
+}
 /* ---- 七段 LED（与扫雷同款；显示步数与用时） ---- */
 const SEG_ON = '#f00', SEG_OFF = '#3d0000';
 const SEG_POS = {
@@ -79,27 +90,28 @@ const PIP_LAYOUT = {
 };
 function cardInner(card) {
     const r = rankLabel(card.rank);
-    const sym = SUIT_CHAR[card.suit];
-    const corners = '<div class="corner tl"><span class="r">' + r + '</span><span class="s">' + sym + '</span></div>'
-        + '<div class="corner br"><span class="r">' + r + '</span><span class="s">' + sym + '</span></div>';
-    if (card.rank >= 11) {
-        // J / Q / K：中央画框 + 字母 + 花色（无人物图，保持零资源）
-        return corners + '<div class="court"><span class="letter">' + r + '</span><span class="suit">' + sym + '</span></div>';
-    }
+    const sm = suitSvg(card.suit);
+    const cornerHtml = '<span class="r">' + r + '</span><span class="s">' + sm + '</span>';
+    const corners = '<div class="corner tl">' + cornerHtml + '</div><div class="corner br">' + cornerHtml + '</div>';
     if (card.rank === 1)
-        return corners + '<div class="pip ace" style="left:50%;top:52%">' + sym + '</div>';
+        return corners + '<div class="pip ace">' + suitSvg(card.suit) + '</div>';
+    if (card.rank >= 11) {
+        // J / Q / K：中央画框 + 大字母 + 花色徽记（零人物图、零资源）
+        return corners + '<div class="court"><span class="letter">' + r + '</span><span class="s">' + sm + '</span></div>';
+    }
     const layout = PIP_LAYOUT[card.rank];
     if (!layout)
-        return corners + '<div class="pip big" style="left:50%;top:52%">' + sym + '</div>';
+        return corners;
     let pips = '';
     for (const [x, y] of layout) {
-        pips += '<div class="pip' + (y > 50 ? ' flip' : '') + '" style="left:' + x + '%;top:' + y + '%">' + sym + '</div>';
+        pips += '<div class="pip' + (y > 50 ? ' flip' : '') + '" style="left:' + x + '%;top:' + y + '%">' + suitSvg(card.suit) + '</div>';
     }
     return corners + pips;
 }
 function cardEl(card, extraClass = '') {
     const el = document.createElement('div');
-    el.className = 'card ' + (card.faceUp ? 'face-up ' + (isRed(card) ? 'red' : 'black') : 'back') + (extraClass ? ' ' + extraClass : '');
+    const suitCls = 's-' + card.suit;
+    el.className = 'card ' + (card.faceUp ? 'face-up ' + (isRed(card) ? 'red ' : 'black ') + suitCls : 'back') + (extraClass ? ' ' + extraClass : '');
     el.innerHTML = card.faceUp ? cardInner(card) : '<div class="back-inner"></div>';
     return el;
 }
@@ -108,8 +120,9 @@ let engine;
 let ledScore, ledTime;
 let selected = null;
 let drag = null;
-let pendingClick = null;
 let lastClick = null;
+/** 「可以自动完成了」的提示每局只弹一次 */
+let autoPromptShown = false;
 let hintTimer = null;
 let winTimer = null;
 let clockTimer = null;
@@ -119,19 +132,22 @@ let menuOpen = null;
 const tableEl = () => $('#table');
 const dragLayer = () => $('#dragLayer');
 const tableauEl = () => $('#tableau');
-/* ---- 尺寸：牌宽来自 --card-w，可叠区高度来自 --fan-ratio * 牌高 ---- */
+/* ---- 尺寸：CSS 声明纯 px/纯数字变量（--card-w/--card-h/--fan-ratio/--fan-down-ratio/--gap），
+       JS 直接 parseFloat 即可与真实渲染尺寸完全一致。
+       别把它们写成 calc()：getComputedStyle 对自定义属性返回的是未解析的 calc 字符串，
+       parseFloat 会得到 NaN，静默退回硬编码值 → CSS 改了 JS 跟不上（曾经踩过的坑）。 ---- */
 function metrics() {
     const cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
     const read = (name, fallback) => {
         const v = parseFloat(String(cs?.getPropertyValue?.(name) ?? ''));
         return Number.isFinite(v) ? v : fallback;
     };
-    const w = read('--card-w', 79);
-    const h = read('--card-h', Math.round(w * 1.4));
-    const ratio = read('--fan-ratio', 0.22);
-    const fan = Math.round(h * ratio);
-    const gap = read('--gap', 8);
-    return { w, h, fan, gap };
+    const w = read('--card-w', 104);
+    const h = read('--card-h', 146);
+    const fan = Math.round(h * read('--fan-ratio', 0.24));
+    const fanDown = Math.round(h * read('--fan-down-ratio', 0.16));
+    const gap = read('--gap', 12);
+    return { w, h, fan, fanDown, gap };
 }
 /* ---- 渲染 ---- */
 function render() {
@@ -176,7 +192,8 @@ function renderWaste() {
     for (let i = start; i < cards.length; i++) {
         const c = cards[i];
         const offset = cards.length - 1 - i; // 0 = 最上面
-        const cls = engine.passCount === 3 && offset > 0 ? 'w' + (offset + 1) : '';
+        // 三张扇形：最上面那张必须给 w1（最右 26%），否则它会和最下面的牌挤在一起（修过的 bug）
+        const cls = engine.passCount === 3 && cards.length > 1 ? 'w' + (offset + 1) : '';
         const ce = cardEl(c, cls);
         ce.dataset.pile = 'waste';
         ce.dataset.index = String(i);
@@ -190,7 +207,7 @@ function renderFoundations() {
     for (const s of SUITS) {
         const el = $('#found' + s);
         el.innerHTML = '';
-        el.dataset.hint = FOUND_HINT[s];
+        el.classList.add('s-' + s); // 空位花色底纹靠 class 定位（CSS ::before 用 data-URI SVG）
         const cards = engine.cardsAt({ kind: 'foundation', suit: s });
         if (cards.length) {
             const ce = cardEl(cards[cards.length - 1]);
@@ -204,7 +221,7 @@ function renderFoundations() {
 function renderTableau() {
     const root = tableauEl();
     root.innerHTML = '';
-    const { w, h, fan } = metrics();
+    const { h, fan, fanDown } = metrics();
     for (let i = 0; i < 7; i++) {
         const col = document.createElement('div');
         col.className = 'col';
@@ -224,7 +241,7 @@ function renderTableau() {
             if (k === cards.length - 1)
                 ce.dataset.top = '1';
             col.appendChild(ce);
-            y += c.faceUp ? fan : Math.round(fan * 0.55);
+            y += c.faceUp ? fan : fanDown;
         }
         // 列高随牌数增长：给父容器撑开滚动/布局高度
         const last = cards.length ? y : 0;
@@ -363,9 +380,6 @@ function sourceAt(target, clientX, clientY) {
             if (!cards[idx]?.faceUp)
                 return null;
             const count = cards.length - idx;
-            if (!engine.canMove({ kind: 'tableau', index: col }, count, { kind: 'tableau', index: col })) {
-                // canMove 对同一位置恒为 false，只能检查明牌段
-            }
             for (let k = idx; k < cards.length; k++)
                 if (!cards[k].faceUp)
                     return null;
@@ -384,9 +398,11 @@ function dropTargetAt(x, y, src) {
     if (!el)
         return null;
     const pile = pileFromElement(el);
-    if (!pile || pile.kind === 'stock')
+    if (!pile)
         return null;
-    if (pile.kind === 'waste' && src.loc.kind === 'waste')
+    // 牌库永远不能作为落点；废牌堆也不收牌（统一行为：非法落点一律静默回弹，
+    // 不要让「拖到废牌堆」弹错误 toast 而「拖到空白处」却无反应）
+    if (pile.kind === 'stock' || pile.kind === 'waste')
         return null;
     return pile;
 }
@@ -418,9 +434,7 @@ function onPointerDown(e) {
     }
     if (engine.phase === 'won')
         return;
-    const { w, h, fan } = metrics();
     const rect = target.getBoundingClientRect?.() ?? { left: 0, top: 0 };
-    pendingClick = { source: src, x: e.clientX ?? 0, y: e.clientY ?? 0 };
     drag = {
         source: src,
         el: null,
@@ -428,7 +442,6 @@ function onPointerDown(e) {
         offsetX: (e.clientX ?? 0) - rect.left,
         offsetY: (e.clientY ?? 0) - rect.top,
         moved: false,
-        cardW: w, cardH: h,
     };
     // 拖拽期间持续收到指针事件（鼠标移出窗口也能正确收尾）
     try {
@@ -454,10 +467,8 @@ function onPointerMove(e) {
     highlightDrop(dropTargetAt(x, y, drag.source));
 }
 function onPointerUp(e) {
-    if (!drag) {
-        pendingClick = null;
+    if (!drag)
         return;
-    }
     const d = drag;
     drag = null;
     const x = e.clientX ?? d.startX, y = e.clientY ?? d.startY;
@@ -467,34 +478,27 @@ function onPointerUp(e) {
         const now = Date.now();
         const dblHit = lastClick !== null && now - lastClick.at < 400 && sameLocation(lastClick.loc, d.source.loc);
         lastClick = { loc: d.source.loc, at: now };
-        if (dblHit && d.source.count === 1) {
-            if (autoCollect(d.source.loc)) {
-                pendingClick = null;
+        if (dblHit && d.source.count === 1 && autoCollect(d.source.loc))
+            return;
+        // 已有选中牌 → 点目标放下（点同一张则取消选中）
+        if (selected && !sameLocation(selected.loc, d.source.loc) && d.source.loc.kind !== 'stock') {
+            if (tryMove(selected, d.source.loc))
                 return;
-            }
-        }
-        const pile = pileFromElement(e.target);
-        // 已有选中牌 → 点目标放下（点同一张则取消）
-        if (selected && pile && !sameLocation(selected.loc, pile) && pile.kind !== 'stock') {
-            tryMove(selected, pile);
-            pendingClick = null;
+            // 落不下去时不能让选中态卡住：改选刚点的这张牌（与经典 Klondike 一致）
+            selectSource(d.source);
             return;
         }
         if (selected && sameLocation(selected.loc, d.source.loc)) {
             selectSource(null);
-            pendingClick = null;
             return;
         }
-        if (!selected)
-            selectSource(d.source);
-        pendingClick = null;
+        selectSource(d.source);
         return;
     }
     // 拖动结束：落点合法就移动，否则回弹
     const dst = dropTargetAt(x, y, d.source);
     clearDragVisual();
     clearDropHighlights();
-    pendingClick = null;
     if (dst)
         tryMove(d.source, dst);
     else
@@ -629,7 +633,10 @@ function showHint() {
 }
 /* ---- 自动完成 ---- */
 function checkAutoFinishPrompt() {
+    if (autoPromptShown)
+        return;
     if (engine.canAutoFinish() && engine.phase === 'playing') {
+        autoPromptShown = true;
         toast('全部牌已翻开，可以点「自动完成」收尾', 2600);
     }
 }
@@ -662,6 +669,7 @@ function autoFinish() {
 function newGame(pass, rand, clock) {
     if (pass !== undefined)
         passCount = pass;
+    autoPromptShown = false;
     if (winTimer) {
         clearTimeout(winTimer);
         winTimer = null;
@@ -674,6 +682,7 @@ function newGame(pass, rand, clock) {
     startClock();
 }
 function restart() {
+    autoPromptShown = false;
     if (winTimer) {
         clearTimeout(winTimer);
         winTimer = null;
@@ -864,7 +873,11 @@ function onMenuItem(act) {
     }
 }
 function showRules() {
-    toast('目标：把四门花色从 A 到 K 收齐。牌阵红黑交替、点数递减；空列只能放 K。', 4200);
+    const el = $('.rules');
+    if (el?.scrollIntoView)
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else
+        toast('目标：把四门花色从 A 到 K 收齐。牌阵红黑交替、点数递减；空列只能放 K。', 4200);
 }
 function showAbout() {
     toast('经典纸牌接龙 · TypeScript + 原生 DOM，零运行时依赖', 3600);
@@ -994,7 +1007,7 @@ init();
 /* 测试钩子：uitest 以最小 DOM stub 执行本文件后，借它驱动流程（生产环境无害） */
 globalThis.__sui = {
     newGame, restart, undo, doDraw, showHint, autoFinish,
-    setEngine(e) { engine = e; render(); },
+    setEngine(e) { engine = e; autoPromptShown = false; render(); },
     engine: () => engine,
     render,
     metrics,
