@@ -113,7 +113,7 @@ function mkEl(tag = 'div'): StubEl {
       return parts.some(one);
     },
     closest(sel: string) { let p: StubEl | null = el; while (p) { if (p.matches(sel)) return p; p = p.parent; } return null; },
-    getBoundingClientRect() { return { left: 0, top: 0, width: 79, height: 110 }; },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 96, height: 110 }; },
     getAttribute() { return null; },
     _id: '',
   };
@@ -225,9 +225,9 @@ globalAny.Solitaire = SOL;
 globalAny.self = globalAny;
 globalAny.getComputedStyle = () => ({
   getPropertyValue: (name: string): string => {
-    // 必须是纯 px / 纯数字：metrics() 用 parseFloat 读取，写成 calc() 会读不到
+    // 宽度/间距为纯 px；高度由真实牌元素测量，支持 CSS calc 比例。
     const map: Record<string, string> = {
-      '--card-w': '104px', '--card-h': '146px', '--gap': '12px',
+      '--card-w': '96px', '--gap': '12px',
       '--fan-ratio': '0.24', '--fan-down-ratio': '0.18',
     };
     return map[name] ?? '';
@@ -236,8 +236,18 @@ globalAny.getComputedStyle = () => ({
 const timerHandles = new Set<number>();
 globalAny.setInterval = () => { const h = 1; timerHandles.add(h); return h; };
 globalAny.clearInterval = (h: number) => { timerHandles.delete(h); };
-globalAny.setTimeout = (f: any) => { return 1; };
-globalAny.clearTimeout = () => { /* noop */ };
+let nextTimer = 0;
+const pendingTimers = new Map<number, () => void>();
+globalAny.setTimeout = (f: () => void) => { const h = ++nextTimer; pendingTimers.set(h, f); return h; };
+globalAny.clearTimeout = (h: number) => { pendingTimers.delete(h); };
+function runNextTimer(): boolean {
+  const next = pendingTimers.entries().next();
+  if (next.done) return false;
+  const [handle, callback] = next.value;
+  pendingTimers.delete(handle);
+  callback();
+  return true;
+}
 globalAny.requestAnimationFrame = (f: any) => { f(0); return 1; };
 
 /* ---------- 载入并执行 dist/ui.js ---------- */
@@ -481,11 +491,44 @@ section('U13 restart 与自动完成的边界', () => {
   ok(stuck.canAutoFinish() === false, '牌库还有牌时不能自动完成');
 });
 
-section('U14 metrics 与 CSS 变量一致（回归：以前读不到 calc()）', () => {
+section('U14 metrics 与 CSS 变量一致（支持 calc 牌高）', () => {
   const m = U.metrics();
-  ok(m.w === 104 && m.h === 146, '牌宽/牌高取自纯 px 变量');
-  ok(m.fan === 35 && m.fanDown === 26, '明牌/暗牌叠放高度按比例算出');
+  ok(m.w === 96 && m.h === 110, '牌宽读取变量，牌高读取真实牌元素');
+  ok(m.fan === 26 && m.fanDown === 20, '明牌/暗牌叠放高度按真实牌高算出');
   ok(m.gap === 12, '间隙取自纯 px 变量');
+});
+
+section('U15 自动完成异步任务与列高边界', () => {
+  pendingTimers.clear();
+  const fill = (suit: Suit): CardSpec[] => Array.from({ length: 12 }, (_, i) => [suit, i + 1] as CardSpec);
+  const ready = SOL.Solitaire.planted({
+    tableau: [[['S', 13]], [['H', 13]], [['D', 13]], [['C', 13]]],
+    foundations: { S: fill('S'), H: fill('H'), D: fill('D'), C: fill('C') },
+  });
+  U.setEngine(ready);
+  U.autoFinish();
+  ok(ready.moves === 1, '自动完成先同步执行一步');
+  U.undo();
+  const movesAfterUndo = ready.moves;
+  runNextTimer();
+  ok(ready.moves === movesAfterUndo, '撤销后旧自动完成任务不会再次改牌');
+
+  pendingTimers.clear();
+  U.setEngine(ready);
+  U.autoFinish();
+  U.newGame();
+  const fresh = U.engine();
+  const stockAfterNewGame = fresh.stockCount;
+  runNextTimer();
+  ok(fresh.stockCount === stockAfterNewGame && fresh.moves === 0, '新游戏后旧任务不会串扰新牌局');
+
+  pendingTimers.clear();
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 7]], [['C', 8], ['H', 6]]] }));
+  const singleHeight = parseFloat(colEl(0).style.height);
+  const twoHeight = parseFloat(colEl(1).style.height);
+  const m = U.metrics();
+  ok(Math.abs(singleHeight - m.h) < 0.01 && Math.abs(twoHeight - (m.h + m.fan)) < 0.01,
+    '列高只包含最后一张牌自身，不多算一个牌间距');
 });
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

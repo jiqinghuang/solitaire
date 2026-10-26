@@ -78,7 +78,9 @@ function makeLed(el: any): Led {
       const ch = shown[d] ?? ' ';
       const on = SEG_MAP[ch] ?? '';
       const row = segs[d];
-      for (let i = 0; i < row.length; i++) row[i].style.background = on.includes('abcdefg'[i]) ? SEG_ON : SEG_OFF;
+      for (let i = 0; i < row.length; i++) {
+        row[i].style.backgroundColor = on.includes('abcdefg'[i]) ? SEG_ON : SEG_OFF;
+      }
     }
   };
   return { el, segs, set };
@@ -86,17 +88,17 @@ function makeLed(el: any): Led {
 
 /* ---- 牌元素 ---- */
 
-/** 中央花色的排布（百分比坐标；y 为 0–100 的相对位置，flip=倒置） */
+/** 中央花色排布：双列固定在 40% / 60%，为两侧角标（尤其 10）留出空间。 */
 const PIP_LAYOUT: Record<number, Array<[number, number]>> = {
   2: [[50, 22], [50, 78]],
   3: [[50, 20], [50, 50], [50, 80]],
-  4: [[30, 22], [70, 22], [30, 78], [70, 78]],
-  5: [[30, 22], [70, 22], [50, 50], [30, 78], [70, 78]],
-  6: [[30, 20], [70, 20], [30, 50], [70, 50], [30, 80], [70, 80]],
-  7: [[30, 20], [70, 20], [50, 35], [30, 50], [70, 50], [30, 80], [70, 80]],
-  8: [[30, 20], [70, 20], [50, 35], [30, 50], [70, 50], [50, 65], [30, 80], [70, 80]],
-  9: [[30, 18], [70, 18], [30, 36], [70, 36], [50, 50], [30, 64], [70, 64], [30, 82], [70, 82]],
-  10: [[30, 16], [70, 16], [50, 28], [30, 40], [70, 40], [30, 60], [70, 60], [50, 72], [30, 84], [70, 84]],
+  4: [[40, 22], [60, 22], [40, 78], [60, 78]],
+  5: [[40, 22], [60, 22], [50, 50], [40, 78], [60, 78]],
+  6: [[40, 20], [60, 20], [40, 50], [60, 50], [40, 80], [60, 80]],
+  7: [[40, 20], [60, 20], [50, 35], [40, 50], [60, 50], [40, 80], [60, 80]],
+  8: [[40, 20], [60, 20], [50, 35], [40, 50], [60, 50], [50, 65], [40, 80], [60, 80]],
+  9: [[40, 18], [60, 18], [40, 36], [60, 36], [50, 50], [40, 64], [60, 64], [40, 82], [60, 82]],
+  10: [[40, 16], [60, 16], [50, 28], [40, 40], [60, 40], [40, 60], [60, 60], [50, 72], [40, 84], [60, 84]],
 };
 
 function cardInner(card: Card): string {
@@ -140,6 +142,9 @@ let drag: {
 let lastClick: { loc: PileRef; at: number } | null = null;
 /** 「可以自动完成了」的提示每局只弹一次 */
 let autoPromptShown = false;
+/** 自动完成定时器及所属牌局；撤销/新局时必须使旧回调失效。 */
+let autoFinishTimer: any = null;
+let gameGeneration = 0;
 let hintTimer: any = null;
 let winTimer: any = null;
 let clockTimer: any = null;
@@ -151,18 +156,20 @@ const tableEl = (): any => $('#table');
 const dragLayer = (): any => $('#dragLayer');
 const tableauEl = (): any => $('#tableau');
 
-/* ---- 尺寸：CSS 声明纯 px/纯数字变量（--card-w/--card-h/--fan-ratio/--fan-down-ratio/--gap），
-       JS 直接 parseFloat 即可与真实渲染尺寸完全一致。
-       别把它们写成 calc()：getComputedStyle 对自定义属性返回的是未解析的 calc 字符串，
-       parseFloat 会得到 NaN，静默退回硬编码值 → CSS 改了 JS 跟不上（曾经踩过的坑）。 ---- */
+/* ---- 尺寸：宽度和间距读取纯 px 变量；高度读取 CSS calc 计算后的真实牌高。
+       这样牌高可以始终与牌宽保持同一比例，又不会让 JS 布局与真实画面漂移。 ---- */
 function metrics(): { w: number; h: number; fan: number; fanDown: number; gap: number } {
   const cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
   const read = (name: string, fallback: number): number => {
     const v = parseFloat(String(cs?.getPropertyValue?.(name) ?? ''));
     return Number.isFinite(v) ? v : fallback;
   };
-  const w = read('--card-w', 104);
-  const h = read('--card-h', 146);
+  const w = read('--card-w', 96);
+  const actualCard = $('#stock .stock-back') ?? $('#stock');
+  const measuredH = actualCard?.getBoundingClientRect?.().height;
+  const h = Number.isFinite(measuredH) && measuredH > 0
+    ? measuredH
+    : Math.round(w * 1.35);
   const fan = Math.round(h * read('--fan-ratio', 0.24));
   const fanDown = Math.round(h * read('--fan-down-ratio', 0.16));
   const gap = read('--gap', 12);
@@ -265,9 +272,11 @@ function renderTableau(): void {
       y += c.faceUp ? fan : fanDown;
     }
     // 列高随牌数增长：给父容器撑开滚动/布局高度
-    const last = cards.length ? y : 0;
-    col.style.height = Math.max(h, last + h) + 'px';
-    col.style.minHeight = Math.max(h, last + h) + 'px';
+    // y 已包含每张牌（含最后一张）的偏移，最后一张只需再补自身高度。
+    const lastStep = cards.length ? (cards[cards.length - 1].faceUp ? fan : fanDown) : 0;
+    const columnHeight = cards.length ? y - lastStep + h : h;
+    col.style.height = columnHeight + 'px';
+    col.style.minHeight = columnHeight + 'px';
     root.appendChild(col);
   }
 }
@@ -278,10 +287,9 @@ function renderStatus(): void {
 }
 
 function syncButtons(): void {
-  const undoBtn = $('#btnUndo');
   const hintBtn = $('#btnHint');
   const autoBtn = $('#btnAuto');
-  if (undoBtn) undoBtn.disabled = engine.phase === 'won';
+  // 撤销在胜利后仍可用：按钮行为与引擎、菜单、快捷键保持一致。
   if (hintBtn) hintBtn.disabled = engine.phase === 'won';
   if (autoBtn) autoBtn.disabled = !engine.canAutoFinish();
 }
@@ -344,6 +352,7 @@ function clearTransient(): void {
 }
 
 function tryMove(src: Source, dst: PileRef): boolean {
+  stopAutoFinish();
   const res = engine.move(src.loc, src.count, dst);
   if (!res.ok) { toast(res.reason, 1400); return false; }
   clearTransient();
@@ -450,7 +459,7 @@ function onPointerDown(e: any): void {
     moved: false,
   };
   // 拖拽期间持续收到指针事件（鼠标移出窗口也能正确收尾）
-  try { (e.target as any)?.setPointerCapture?.(e.pointerId); } catch { /* 忽略不支持的环境 */ }
+  try { tableEl().setPointerCapture?.(e.pointerId); } catch { /* 忽略不支持的环境 */ }
   // 阻止触屏滚动与文本选择
   if (e.cancelable) e.preventDefault?.();
 }
@@ -569,6 +578,7 @@ function clearDropHighlights(): void {
 /* ---- 双击收牌 ---- */
 
 function autoCollect(loc: PileRef): boolean {
+  stopAutoFinish();
   const suit = engine.autoMove(loc);
   if (!suit) return false;
   clearTransient();
@@ -582,6 +592,7 @@ function autoCollect(loc: PileRef): boolean {
 
 function doDraw(): void {
   if (engine.phase === 'won') return;
+  stopAutoFinish();
   const r = engine.draw();
   clearTransient();
   render();
@@ -624,16 +635,30 @@ function checkAutoFinishPrompt(): void {
   }
 }
 
+function stopAutoFinish(): void {
+  if (autoFinishTimer !== null) { clearTimeout(autoFinishTimer); autoFinishTimer = null; }
+  // 即使当前正处于同步 step 中，也让尚未排队的旧回调失效。
+  gameGeneration++;
+}
+
 function autoFinish(): void {
   if (engine.phase === 'won') return;
   if (!engine.canAutoFinish()) { toast('牌库和废牌堆清空、所有牌翻开后才能自动完成', 2000); return; }
+  stopAutoFinish();
   clearTransient();
+  const generation = gameGeneration;
   let guard = 0;
   const step = (): void => {
-    if (engine.phase === 'won' || guard++ > 200) { render(); if (engine.phase === 'won') winSequence(); return; }
+    autoFinishTimer = null;
+    if (generation !== gameGeneration || engine.phase === 'won' || guard++ > 200) {
+      if (generation !== gameGeneration) return;
+      render();
+      if (engine.phase === 'won') winSequence();
+      return;
+    }
     if (!engine.autoFinishStep()) { render(); return; }
     render();
-    setTimeout(step, 90);
+    autoFinishTimer = setTimeout(step, 90);
   };
   step();
 }
@@ -641,6 +666,7 @@ function autoFinish(): void {
 /* ---- 新游戏 / 撤销 ---- */
 
 function newGame(pass?: PassCount, rand?: () => number, clock?: () => number): void {
+  stopAutoFinish();
   if (pass !== undefined) passCount = pass;
   autoPromptShown = false;
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
@@ -652,6 +678,7 @@ function newGame(pass?: PassCount, rand?: () => number, clock?: () => number): v
 }
 
 function restart(): void {
+  stopAutoFinish();
   autoPromptShown = false;
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
   for (const n of $$('.win-banner, .bouncing')) n.remove?.();
@@ -662,11 +689,14 @@ function restart(): void {
 }
 
 function undo(): void {
+  stopAutoFinish();
   if (!engine.undo()) { toast('没有可撤销的操作', 1200); return; }
   for (const n of $$('.win-banner, .bouncing')) n.remove?.();
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
   clearTransient();
   render();
+  // 从胜利状态撤销后恢复时钟刷新。
+  if (!clockTimer) startClock();
 }
 
 /* ---- 计时刷新 ---- */
@@ -683,6 +713,7 @@ function startClock(): void {
 
 function winSequence(): void {
   if (winTimer || engine.phase !== 'won') return;
+  const generation = gameGeneration;
   const table = tableEl();
   const { w, h } = metrics();
   const layer = document.createElement('div');
@@ -713,7 +744,7 @@ function winSequence(): void {
     let alive = true;
     const W = table.clientWidth || (w * 7 + 64), H = table.clientHeight || 440;
     const tick = (): void => {
-      if (!alive) return;
+      if (!alive || generation !== gameGeneration || engine.phase !== 'won') return;
       vy += 0.35;
       x += vx; y += vy;
       if (x < 0) { x = 0; }
@@ -723,7 +754,11 @@ function winSequence(): void {
       if (alive) requestAnimationFrame(tick);
       else c.remove?.();
     };
-    setTimeout(() => { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick); }, Math.random() * 400);
+    setTimeout(() => {
+      if (generation === gameGeneration && engine.phase === 'won' && typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(tick);
+      }
+    }, Math.random() * 400);
   }
 
   winTimer = setTimeout(() => {
@@ -868,6 +903,7 @@ function bindEvents(): void {
   });
 
   window.addEventListener('blur', () => {
+    stopAutoFinish();
     if (drag) { drag = null; clearDragVisual(); clearDropHighlights(); }
     closeMenu();
   });

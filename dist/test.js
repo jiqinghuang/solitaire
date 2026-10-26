@@ -92,6 +92,19 @@ section('2 牌阵/收牌区叠放规则', () => {
     const e3 = EngineCtor.planted({ tableau: [[['S', 5, true], ['H', 4, false]]] });
     ok(e3.canMove(COL(0), 2, COL(1)) === false, '含暗牌的牌组不能整组移动');
     ok(e3.canMove(COL(0), 1, COL(1)) === false, '暗牌不能单独移动');
+    // 整组不仅要全明，组内也必须满足红黑交替、点数递减。
+    const sequence = EngineCtor.planted({
+        tableau: [
+            [['S', 7], ['H', 6], ['S', 5]], [['D', 8]],
+            [['S', 7], ['D', 5], ['S', 4]],
+            [['S', 7], ['D', 6], ['D', 5]],
+        ],
+    });
+    ok(sequence.canMove(COL(0), 3, COL(1)) === true, '合法明牌序列可以整组移动');
+    ok(sequence.canMove(COL(2), 3, COL(1)) === false, '组内点数断层时拒绝整组移动');
+    ok(sequence.canMove(COL(3), 3, COL(1)) === false, '组内颜色未交替时拒绝整组移动');
+    ok(sequence.canMove(WASTE, 2, COL(1)) === false, '废牌堆不能一次移走多张');
+    ok(sequence.canMove(FOUND('S'), 2, COL(1)) === false, '收牌区不能一次移走多张');
     // 收牌区：同花色、从 A 起递增、一次一张
     const e4 = EngineCtor.planted({
         foundations: { S: [['S', 1], ['S', 2]] },
@@ -208,6 +221,15 @@ section('7 计时', () => {
     ok(e.elapsed() === 2, '时钟回拨不产生负秒（钳到 0 后仍是单调结果）');
     now = 0;
     ok(e.elapsed() >= 0, '时钟回到 0 也不出现负秒');
+    // 回归：第一张可操作的牌就完成全局时，不能一直显示 0 秒。
+    const fill = (suit, n) => Array.from({ length: n }, (_, i) => [suit, i + 1]);
+    let clockCalls = 0;
+    const immediateWin = EngineCtor.planted({
+        foundations: { S: fill('S', 12), H: fill('H', 13), D: fill('D', 13), C: fill('C', 13) },
+        tableau: [[['S', 13]]],
+    }, () => 1000 + (clockCalls++) * 5000);
+    immediateWin.move(COL(0), 1, FOUND('S'));
+    ok(immediateWin.phase === 'won' && immediateWin.elapsed() === 5, '首次操作即获胜时建立计时起止点并正常冻结');
 });
 /* ---------- [8] 提示 ---------- */
 section('8 提示', () => {

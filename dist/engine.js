@@ -171,12 +171,21 @@
                 return false;
             if (!Number.isInteger(count) || count < 1)
                 return false;
+            // 只有牌阵允许整组移动；废牌堆与收牌区都只能操作顶牌。
+            if (from.kind !== 'tableau' && count !== 1)
+                return false;
             const src = this.pile(from);
             if (count > src.length)
                 return false;
             const moving = src.slice(src.length - count);
             if (moving.some((c) => !c.faceUp))
                 return false;
+            // 全为明牌还不够：整组自身也必须满足红黑交替、点数递减。
+            for (let i = 1; i < moving.length; i++) {
+                const upper = moving[i - 1], lower = moving[i];
+                if (upper.rank !== lower.rank + 1 || isRed(upper) === isRed(lower))
+                    return false;
+            }
             if (to.kind === 'foundation') {
                 if (count !== 1)
                     return false;
@@ -218,8 +227,12 @@
         checkWin() {
             const total = SUITS.reduce((n, s) => n + this.foundations[s].length, 0);
             if (total === 52 && this._phase !== 'won') {
+                const now = this.clock();
+                // 首次操作即获胜时也必须建立计时起点，否则 endedAt 会被 elapsed 忽略。
+                if (this._startedAt === null)
+                    this._startedAt = now;
                 this._phase = 'won';
-                this._endedAt = this.clock();
+                this._endedAt = now;
             }
         }
         move(from, count, to) {

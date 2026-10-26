@@ -2,10 +2,8 @@
    全部纯 CSS + 内联 SVG，零图片/字体资源。
 
    尺寸约定（JS metrics() 依赖这几个变量，务必保持「纯 px / 纯数字」）：
-     --card-w / --card-h  必须是纯 px，不能写成 calc()；
-     --fan-ratio / --fan-down-ratio / --gap  必须是纯数字 / 纯 px。
-   原因：getComputedStyle 对自定义属性返回未解析的 calc 字符串，parseFloat 得到 NaN，
-   JS 会静默退回硬编码值 → 改 CSS 不生效、且与真实渲染尺寸漂移。 */
+     --card-w / --gap 必须是纯 px，--fan-ratio / --fan-down-ratio 必须是纯数字；
+     --card-h 用 calc() 与牌宽保持比例，JS 从真实牌元素读取计算后的像素高度。 */
 
 /* ---- 调色与尺寸旋钮 ---- */
 :root {
@@ -16,11 +14,18 @@
   --navy: #000080;
   --desktop: #008080;
 
-  /* 纸牌尺寸（桌面档，较大） */
-  --card-w: 104px;
-  --card-h: 146px;
+  /* 统一采用接近经典 Win95 的 1.35:1；各断点只覆盖牌宽和圆角。
+     --card-h 显式使用 calc，JS metrics() 会从真实牌元素读取计算后的像素值。 */
+  --card-ratio: 1.35;
+  --card-w: 96px;
+  --card-h: calc(var(--card-w) * var(--card-ratio));
   --gap: 12px;
-  --card-radius: 8px;
+  --card-radius: calc(var(--card-w) * 0.07);
+
+  /* 索引与中央花色使用独立尺寸，避免随牌宽放大后互相挤压。 */
+  --index-size: calc(var(--card-w) * 0.205);
+  --index-suit: calc(var(--card-w) * 0.14);
+  --pip-size: calc(var(--card-w) * 0.15);
 
   /* 牌阵叠放：明牌露出比例 / 暗牌露出比例 */
   --fan-ratio: 0.24;
@@ -184,7 +189,8 @@ body {
   border: 3px solid #1b1b1b;
   border-radius: 5px;
   padding: var(--gap);
-  width: calc(var(--card-w) * 7 + var(--gap) * 8);
+  /* 7 张牌之间有 6 个 gap，加上左右 padding 共 8 个。 */
+  width: calc(var(--card-w) * 7 + var(--gap) * 8 + 6px);
   min-height: 520px;
   overflow: visible;
   box-shadow: inset 0 0 90px rgba(0, 0, 0, .34), inset 0 2px 0 rgba(255, 255, 255, .12);
@@ -319,32 +325,45 @@ body {
   flex: none;
 }
 
-/* 左上 / 右下点数索引 */
+/* 角标与中央图案分区：给两位数的 10 固定预留足够宽度。 */
 .card .corner {
   position: absolute;
+  z-index: 1;
+  width: 29%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  line-height: .88;
+  line-height: .9;
   font-family: Tahoma, "Segoe UI", Arial, sans-serif;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
-.card .corner.tl { left: 5.5%; top: 3%; }
-.card .corner.br { right: 5.5%; bottom: 3%; transform: rotate(180deg); }
-.card .corner .r { font-size: calc(var(--card-w) * 0.215); letter-spacing: -.5px; }
-.card .corner .s { width: calc(var(--card-w) * 0.155); height: calc(var(--card-w) * 0.155); margin-top: 1px; }
+.card .corner.tl { left: 3%; top: 3%; }
+.card .corner.br { right: 3%; bottom: 3%; transform: rotate(180deg); }
+.card .corner .r {
+  display: block;
+  font-size: var(--index-size);
+  line-height: 1;
+  letter-spacing: -.08em;
+  white-space: nowrap;
+}
+.card .corner .s {
+  width: var(--index-suit);
+  height: var(--index-suit);
+  margin-top: calc(var(--card-w) * 0.015);
+}
 
-/* 中央点数 */
+/* 中央点数：双列放在 40% / 60%，避开两侧各 32% 的索引区。 */
 .card .pip {
   position: absolute;
-  width: calc(var(--card-w) * 0.19);
-  height: calc(var(--card-w) * 0.19);
+  width: var(--pip-size);
+  height: var(--pip-size);
   transform: translate(-50%, -50%);
 }
 .card .pip.flip { transform: translate(-50%, -50%) rotate(180deg); }
 .card .pip.ace {
-  width: 54%;
-  height: 54%;
+  width: 38%;
+  height: 38%;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
@@ -356,8 +375,8 @@ body {
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 62%;
-  height: 64%;
+  width: 48%;
+  height: 60%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -370,7 +389,7 @@ body {
 .card .court .letter {
   font-family: Georgia, "Times New Roman", serif;
   font-weight: 700;
-  font-size: calc(var(--card-w) * 0.34);
+  font-size: calc(var(--card-w) * 0.30);
   line-height: 1;
 }
 .card .court .s { width: calc(var(--card-w) * 0.20); height: calc(var(--card-w) * 0.20); }
@@ -541,17 +560,17 @@ body {
 
 /* 大屏（≥1400px）：用更大的牌 */
 @media (min-width: 1400px) {
-  :root { --card-w: 118px; --card-h: 165px; --gap: 13px; --card-radius: 9px; }
+  :root { --card-w: 108px; --gap: 13px; }
 }
 
 @media (max-width: 1180px) {
-  :root { --card-w: 88px; --card-h: 124px; --gap: 10px; --card-radius: 7px; --fan-ratio: 0.25; }
+  :root { --card-w: 82px; --gap: 10px; --fan-ratio: 0.25; }
   .desktop { padding: 20px 10px 36px; gap: 16px; }
   .table { min-height: 440px; }
 }
 
 @media (max-width: 860px) {
-  :root { --card-w: 66px; --card-h: 93px; --gap: 7px; --card-radius: 6px; }
+  :root { --card-w: 66px; --gap: 7px; }
   .led-digit { width: 12px; height: 22px; }
   .btn { min-width: 62px; padding: 3px 9px; }
   .table { min-height: 380px; }
@@ -559,23 +578,23 @@ body {
 }
 
 @media (max-width: 560px) {
-  :root { --card-w: 50px; --card-h: 70px; --gap: 5px; --card-radius: 5px; --fan-ratio: 0.26; }
+  :root { --card-w: 50px; --gap: 5px; --fan-ratio: 0.26; }
   .desktop { padding: 12px 6px 28px; gap: 12px; }
   .tbtns { display: none; }
   .statusbar { margin: 4px 3px 0; padding: 4px; }
   .status-mid { gap: 3px; }
   .status-mid .btn { min-width: 44px; font-size: 11px; padding: 2px 4px; }
   .led-digit { width: 10px; height: 18px; }
-  .card .corner .r { font-size: calc(var(--card-w) * 0.24); }
-  .card .court .letter { font-size: calc(var(--card-w) * 0.38); }
+  .card .court .letter { font-size: calc(var(--card-w) * 0.32); }
   .table { min-height: 300px; }
 }
 
 @media (max-width: 420px) {
-  :root { --card-w: 40px; --card-h: 56px; --gap: 4px; --card-radius: 4px; }
-  .card .corner .r { font-size: calc(var(--card-w) * 0.28); }
-  .card .corner .s { width: calc(var(--card-w) * 0.18); height: calc(var(--card-w) * 0.18); }
+  :root { --card-w: 36px; --gap: 4px; --index-size: 9px; --pip-size: 6px; }
+  .desktop { padding-left: 3px; padding-right: 3px; }
+  .tablewrap { margin-left: 3px; margin-right: 3px; }
+  .statusbar { margin-left: 3px; margin-right: 3px; }
   .card .court { border-width: 1px; }
-  .card .court .letter { font-size: calc(var(--card-w) * 0.42); }
-  .card .court .s { width: calc(var(--card-w) * 0.24); height: calc(var(--card-w) * 0.24); }
+  .card .court .letter { font-size: calc(var(--card-w) * 0.30); }
+  .card .court .s { width: calc(var(--card-w) * 0.18); height: calc(var(--card-w) * 0.18); }
 }
