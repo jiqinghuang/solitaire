@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>纸牌接龙 · Solitaire</title>
+<link rel="stylesheet" href="style.css?v=1">
+</head>
+<body>
+<div class="desktop">
+
+  <div class="win">
+    <!-- 标题栏 -->
+    <div class="titlebar">
+      <span class="ticon"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="9" height="12" rx="1" fill="#fff" stroke="#000"/><rect x="5" y="1" width="9" height="12" rx="1" fill="#fff" stroke="#000"/><path d="M9.5 4.5 L11 7 H8 Z" fill="#f00"/></svg></span>
+      <span class="ttext">纸牌</span>
+      <span class="tbtns">
+        <span class="tbtn"><svg viewBox="0 0 8 7"><rect x="1" y="4.5" width="5" height="1.6" fill="#000"/></svg></span>
+        <span class="tbtn"><svg viewBox="0 0 8 7"><rect x="1.2" y="1.2" width="5.6" height="4.6" fill="none" stroke="#000"/></svg></span>
+        <span class="tbtn tbtn-close"><svg viewBox="0 0 8 7"><path d="M1.5 1 L6.5 6 M6.5 1 L1.5 6" stroke="#000"/></svg></span>
+      </span>
+    </div>
+
+    <!-- 菜单栏 -->
+    <div class="menubar">
+      <div class="menu" id="menuGame">
+        <span class="menutitle">游戏(<u>G</u>)</span>
+        <div class="dropdown" id="menuGameDrop" hidden>
+          <div class="mi" data-act="new"><span class="chk"></span>新游戏(<u>N</u>)<span class="sc">F2</span></div>
+          <div class="mi" data-act="restart"><span class="chk"></span>重新发牌(<u>R</u>)</div>
+          <div class="sep"></div>
+          <div class="mi" data-act="draw1"><span class="chk">●</span>翻一张(<u>1</u>)</div>
+          <div class="mi" data-act="draw3"><span class="chk"> </span>翻三张(<u>3</u>)</div>
+          <div class="sep"></div>
+          <div class="mi" data-act="undo"><span class="chk"></span>撤销(<u>U</u>)<span class="sc">Ctrl+Z</span></div>
+          <div class="mi" data-act="hint"><span class="chk"></span>提示(<u>H</u>)<span class="sc">H</span></div>
+          <div class="mi" data-act="autofinish"><span class="chk"></span>自动完成(<u>F</u><span class="sc">F</span>)</div>
+        </div>
+      </div>
+      <div class="menu" id="menuHelp">
+        <span class="menutitle">帮助(<u>H</u>)</span>
+        <div class="dropdown" id="menuHelpDrop" hidden>
+          <div class="mi" data-act="rules"><span class="chk"></span>玩法说明(<u>R</u>)</div>
+          <div class="sep"></div>
+          <div class="mi" data-act="about"><span class="chk"></span>关于纸牌(<u>A</u>)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div class="statusbar">
+      <div class="led" id="ledScore" title="步数"></div>
+      <div class="status-mid">
+        <button class="btn" id="btnUndo" title="撤销（Ctrl+Z）">撤销</button>
+        <button class="btn" id="btnHint" title="提示（H）">提示</button>
+        <button class="btn" id="btnAuto" title="自动完成（F）">自动完成</button>
+      </div>
+      <div class="led" id="ledTime" title="用时"></div>
+    </div>
+
+    <!-- 牌桌 -->
+    <div class="tablewrap">
+      <div class="table" id="table">
+        <div class="row row-top">
+          <div class="slot stock" id="stock" data-pile="stock" title="牌库"></div>
+          <div class="slot waste" id="waste" data-pile="waste" title="废牌堆"></div>
+          <div class="gap"></div>
+          <div class="slot foundation" id="foundS" data-pile="foundation" data-suit="S" title="收牌区：黑桃"></div>
+          <div class="slot foundation" id="foundH" data-pile="foundation" data-suit="H" title="收牌区：红桃"></div>
+          <div class="slot foundation" id="foundD" data-pile="foundation" data-suit="D" title="收牌区：方块"></div>
+          <div class="slot foundation" id="foundC" data-pile="foundation" data-suit="C" title="收牌区：梅花"></div>
+        </div>
+        <div class="row row-tableau" id="tableau"></div>
+        <div class="drag-layer" id="dragLayer" hidden></div>
+        <div class="toast" id="toast" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 规则说明 -->
+  <div class="rules">
+    <h2>玩法规则</h2>
+    <p><strong>目标</strong>：把 52 张牌按花色、从 A 到 K 依次收进右上角四个收牌区。</p>
+    <ul>
+      <li><strong>牌阵</strong>：7 列。牌要红黑交替、点数递减地叠放；空列只能放 K。</li>
+      <li><strong>收牌区</strong>：同花色从 A 开始按顺序累积，双击顶牌可自动送入。</li>
+      <li><strong>牌库</strong>：点一下翻牌，翻出的牌进废牌堆；牌库翻完后点牌库把废牌堆整体回收重翻。</li>
+      <li><strong>拖动</strong>：按住一张明牌可连同下面整组合法牌一起拖走；也可以先点一下选中，再点目标列。</li>
+      <li><strong>撤销</strong>：Ctrl+Z 或菜单「撤销」。<strong>提示</strong>：H 高亮一条推荐走法。<strong>自动完成</strong>：牌库清空且全明后可用。</li>
+      <li><strong>键盘</strong>：F2 新游戏、Ctrl+Z 撤销、H 提示、F 自动完成、Esc 关闭菜单；Alt+G / Alt+H 展开菜单。</li>
+      <li><strong>触屏</strong>：点按选中/翻开，点目标位置放下；拖动同样支持。</li>
+    </ul>
+    <p class="fail-tip">抽牌模式可在「游戏」菜单里切换：翻一张更容易，翻三张更接近经典难度。切换模式会重新发牌。</p>
+  </div>
+</div>
+
+<script src="dist/engine.js?v=1"></script>
+<script src="dist/ui.js?v=1"></script>
+</body>
+</html>

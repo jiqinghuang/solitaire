@@ -1,0 +1,455 @@
+/* 经典 Win95 纸牌接龙外观：灰面板、双层 bevel、绿呢牌桌、七段 LED。
+   全部纯 CSS + 内联 SVG，零图片/字体资源。 */
+
+/* ---- Win95 调色 ---- */
+:root {
+  --face: #c0c0c0;        /* 面板灰 */
+  --light: #ffffff;       /* bevel 亮边 */
+  --dark: #808080;        /* bevel 暗边 */
+  --black: #0a0a0a;       /* bevel 最深边 */
+  --navy: #000080;        /* 标题栏/高亮蓝 */
+  --desktop: #008080;     /* Win95 桌面青 */
+  --felt: #008000;        /* 经典纸牌绿呢 */
+
+  /* 缩放旋钮：牌宽。牌高是宽度的 1.4 倍（经典比例 71×96 ≈ 1.35） */
+  --card-w: 79px;
+  --card-h: calc(var(--card-w) * 1.4);
+  --gap: 8px;
+  /* 牌阵中明牌/暗牌露出高度的比例（JS 里 metrics() 读的是这两个纯数字，
+     避免去解析 calc() 字符串；改这里就能同时影响 CSS 与拖拽计算） */
+  --fan-ratio: 0.22;
+  --fan-down-ratio: 0.22;
+  --fan: calc(var(--card-h) * var(--fan-ratio));
+  --fan-down: calc(var(--card-h) * var(--fan-down-ratio));
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--desktop);
+  font: 12px/1.7 Tahoma, "Microsoft YaHei", "Segoe UI", sans-serif;
+  -webkit-user-select: none; user-select: none;
+  overflow-x: hidden;
+}
+
+.desktop {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 24px 12px 40px;
+}
+
+/* ================================ 窗口 ================================ */
+
+.win {
+  background: var(--face);
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
+              inset -2px -2px 0 var(--dark),   inset 2px 2px 0 #dfdfdf;
+  padding: 3px;
+}
+
+.titlebar {
+  height: 20px;
+  background: var(--navy);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 0 3px;
+  margin: 1px;
+}
+.ticon { width: 14px; height: 14px; display: flex; flex: 0 0 14px; }
+.ticon svg { width: 100%; height: 100%; }
+.ttext { color: #fff; font-weight: bold; flex: 1; letter-spacing: 1px; white-space: nowrap; }
+.tbtns { display: flex; gap: 2px; }
+.tbtn {
+  width: 16px; height: 14px;
+  background: var(--face);
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light), inset -2px -2px 0 var(--dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.tbtn svg { width: 8px; height: 7px; }
+.tbtn:active { box-shadow: inset 1px 1px 0 var(--black), inset -1px -1px 0 var(--light); }
+
+/* ---- 菜单栏 ---- */
+
+.menubar { padding: 2px 1px; display: flex; gap: 1px; }
+.menu { position: relative; display: inline-block; }
+.menutitle { display: inline-block; padding: 2px 8px; cursor: default; }
+.menutitle.active, .menutitle:hover { background: var(--navy); color: #fff; }
+.menutitle.active:hover { color: #fff; }
+.menutitle u { text-decoration: underline; }
+
+.dropdown {
+  position: absolute; left: 0; top: 100%; z-index: 30;
+  min-width: 198px;
+  background: var(--face);
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
+              inset -2px -2px 0 var(--dark),   inset 2px 2px 0 #dfdfdf,
+              3px 3px 0 rgba(0,0,0,.35);
+  padding: 2px;
+}
+.mi { display: flex; align-items: center; padding: 3px 6px 3px 2px; cursor: default; white-space: nowrap; }
+.mi:hover { background: var(--navy); color: #fff; }
+.mi.disabled { color: var(--dark); text-shadow: 1px 1px 0 var(--light); }
+.mi.disabled:hover { background: transparent; color: var(--dark); }
+.mi .chk { width: 16px; text-align: center; flex: 0 0 16px; }
+.mi .sc { margin-left: auto; padding-left: 18px; }
+.mi:hover u { color: #fff; }
+.sep { height: 0; margin: 3px 2px; border-top: 1px solid var(--dark); border-bottom: 1px solid var(--light); }
+
+/* ---- 状态栏 ---- */
+
+.statusbar {
+  margin: 4px 5px 0;
+  padding: 3px 5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  box-shadow: inset -1px -1px 0 var(--light), inset 1px 1px 0 var(--dark),
+              inset -2px -2px 0 #dfdfdf, inset 2px 2px 0 var(--black);
+}
+.status-mid { display: flex; gap: 4px; flex: 1; justify-content: center; }
+
+.btn {
+  min-width: 56px;
+  padding: 2px 8px;
+  font: inherit;
+  color: #000;
+  background: var(--face);
+  border: none;
+  cursor: pointer;
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
+              inset -2px -2px 0 var(--dark),   inset 2px 2px 0 #dfdfdf;
+}
+.btn:hover { background: #c8c8c8; }
+.btn:active { box-shadow: inset 1px 1px 0 var(--black), inset -1px -1px 0 var(--light), inset 2px 2px 0 var(--dark); padding-top: 3px; padding-bottom: 1px; }
+.btn:disabled { color: var(--dark); text-shadow: 1px 1px 0 var(--light); cursor: default; background: var(--face); }
+.btn:disabled:active { box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light), inset -2px -2px 0 var(--dark), inset 2px 2px 0 #dfdfdf; padding: 2px 8px; }
+
+/* ---- 七段 LED 计数器 ---- */
+
+.led {
+  display: flex;
+  gap: 1px;
+  padding: 2px 3px;
+  background: #000;
+  box-shadow: inset 1px 1px 0 var(--dark), inset -1px -1px 0 var(--light);
+  flex: 0 0 auto;
+}
+.led-digit { position: relative; width: 13px; height: 23px; }
+.seg { position: absolute; background: #3d0000; }
+
+/* ================================ 牌桌 ================================ */
+
+.tablewrap {
+  margin: 4px 5px 5px;
+  box-shadow: inset -1px -1px 0 var(--light), inset 1px 1px 0 var(--dark),
+              inset -2px -2px 0 #dfdfdf, inset 2px 2px 0 var(--black);
+  padding: 3px;
+}
+
+.table {
+  position: relative;
+  background: var(--felt);
+  padding: var(--gap);
+  width: calc(var(--card-w) * 7 + var(--gap) * 8);
+  min-height: 420px;
+  overflow: visible;
+  touch-action: none;          /* 触屏拖动纸牌时不要滚动页面 */
+}
+
+.row { display: flex; gap: var(--gap); }
+.row-top { align-items: flex-start; }
+.row-tableau { align-items: flex-start; }
+
+.gap { flex: 1 1 auto; }
+
+/* 空槽：凹陷的圆角矩形（经典纸牌的空位画法） */
+.slot {
+  position: relative;
+  width: var(--card-w);
+  height: var(--card-h);
+  flex: 0 0 var(--card-w);
+  border-radius: calc(var(--card-w) * 0.06);
+  box-shadow: inset 1px 1px 0 rgba(0,0,0,.45), inset 2px 2px 6px rgba(0,0,0,.35);
+  background: rgba(0,0,0,.10);
+}
+.slot::after {
+  content: '';
+  position: absolute; inset: 3px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: calc(var(--card-w) * 0.05);
+  pointer-events: none;
+}
+.slot.stock { cursor: pointer; }
+.slot.stock.empty { cursor: pointer; }
+.stock-back {
+  position: absolute; inset: 0;
+  border-radius: calc(var(--card-w) * 0.06);
+  background:
+    repeating-linear-gradient(45deg, #1a3f8f 0 3px, #2b5bb8 3px 6px, #12306e 6px 9px),
+    #12306e;
+  border: 2px solid #fff;
+  box-shadow: inset 0 0 0 1px #0a1c44;
+}
+.stock-back::after {
+  content: '';
+  position: absolute; inset: 18%;
+  border: 1px solid rgba(255,255,255,.55);
+  border-radius: 50%;
+}
+.slot.stock.recycle::before {
+  content: '↻';
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: calc(var(--card-w) * 0.46);
+  color: rgba(255,255,255,.42);
+  font-weight: bold;
+}
+.slot.stock.recycle {
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,.28);
+  background: rgba(0,0,0,.16);
+}
+.slot.stock.recycle::after { border-style: dashed; border-color: rgba(255,255,255,.24); }
+
+.stock-count {
+  position: absolute; right: 4px; bottom: 3px; z-index: 2;
+  color: #fff; font-weight: bold;
+  text-shadow: 0 0 2px #000, 1px 1px 0 #000;
+  font-size: 11px;
+}
+
+/* 废牌堆：翻 3 张时横向错开（越新的牌越靠右，最上面的牌盖住左边） */
+.waste { box-shadow: none; background: none; }
+.waste::after { display: none; }
+.waste .card { position: absolute; top: 0; }
+.waste .card.w3 { left: 0; }
+.waste .card.w2 { left: calc(var(--card-w) * 0.13); }
+.waste .card.w1 { left: calc(var(--card-w) * 0.26); }
+
+/* 收牌区：空位显示淡淡的 A 提示 */
+.foundation::before {
+  content: attr(data-hint);
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: calc(var(--card-w) * 0.42);
+  color: rgba(255,255,255,.22);
+  font-weight: bold;
+}
+
+/* ---- 牌 ---- */
+
+.card {
+  position: absolute;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: calc(var(--card-w) * 0.06);
+  background: #fdfdfb;
+  box-shadow: 0 0 0 1px #6b6b6b, 1px 1px 2px rgba(0,0,0,.45);
+  overflow: hidden;
+  cursor: pointer;
+  will-change: transform;
+}
+.card.face-up { color: #000; cursor: grab; }
+.card.face-up:active { cursor: grabbing; }
+.card.back { cursor: default; }
+.card.red { color: #cc0000; }
+.card.black { color: #111; }
+
+/* 左上角点数 + 花色，右下角镜像一份 */
+.card .corner {
+  position: absolute;
+  display: flex; flex-direction: column; align-items: center;
+  line-height: 0.92;
+  font-family: Tahoma, "Segoe UI", Arial, sans-serif; font-weight: bold;
+  letter-spacing: -0.5px;
+}
+.card .corner.tl { left: 4.5%; top: 2.5%; }
+.card .corner.br { right: 4.5%; bottom: 2.5%; transform: rotate(180deg); }
+.card .corner .r { font-size: calc(var(--card-w) * 0.245); }
+.card .corner .s { font-size: calc(var(--card-w) * 0.20); margin-top: 1px; }
+
+/* 中央点数：A 一张大花色，2–10 按经典排布，J/Q/K 用大字母 + 花色 */
+.card .pip {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: calc(var(--card-w) * 0.175);
+  line-height: 1;
+  font-family: "Segoe UI Symbol", "DejaVu Sans", serif;
+}
+.card .pip.flip { transform: translate(-50%, -50%) rotate(180deg); }
+.card .court {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 68%; height: 66%;
+  border: 1px solid currentColor;
+  border-radius: calc(var(--card-w) * 0.05);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.03);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.9);
+}
+.card .court .letter { font-size: calc(var(--card-w) * 0.40); font-weight: bold; line-height: 1; font-family: Georgia, "Times New Roman", serif; }
+.card .court .suit { font-size: calc(var(--card-w) * 0.24); line-height: 1; margin-top: 2px; }
+.card .ace { font-size: calc(var(--card-w) * 0.62); }
+
+/* 牌背 */
+.card.back .back-inner {
+  position: absolute; inset: 0;
+  border-radius: calc(var(--card-w) * 0.06);
+  background:
+    repeating-linear-gradient(45deg, #1a3f8f 0 3px, #2b5bb8 3px 6px, #12306e 6px 9px),
+    #12306e;
+  border: calc(var(--card-w) * 0.045) solid #fff;
+  box-shadow: inset 0 0 0 1px #0a1c44;
+}
+.card.back .back-inner::after {
+  content: '';
+  position: absolute; inset: 20%;
+  border: 1px solid rgba(255,255,255,.5);
+  border-radius: 50%;
+}
+
+/* 牌阵列：绝对定位叠放 */
+.row-tableau { display: flex; gap: var(--gap); align-items: flex-start; padding-top: var(--gap); }
+.col {
+  position: relative;
+  width: var(--card-w);
+  flex: 0 0 var(--card-w);
+  min-height: var(--card-h);
+}
+.col-slot {
+  position: absolute; left: 0; top: 0;
+  width: var(--card-w); height: var(--card-h);
+  border-radius: calc(var(--card-w) * 0.06);
+  box-shadow: inset 1px 1px 0 rgba(0,0,0,.45), inset 2px 2px 6px rgba(0,0,0,.35);
+  background: rgba(0,0,0,.10);
+}
+.col-slot::after {
+  content: '';
+  position: absolute; inset: 3px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: calc(var(--card-w) * 0.05);
+}
+.col .card { left: 0; }
+
+/* 选中态：金色描边 */
+.card.selected {
+  box-shadow: 0 0 0 3px #ffe066, 0 0 0 4px #7a5c00, 1px 1px 3px rgba(0,0,0,.5) !important;
+  z-index: 5;
+}
+
+/* 可放置高亮 */
+.drop-ok { box-shadow: inset 0 0 0 2px #ffe066, inset 0 0 18px rgba(255,224,102,.55) !important; }
+.drop-ok .col-slot { box-shadow: inset 0 0 0 2px #ffe066, inset 0 0 18px rgba(255,224,102,.55); }
+
+/* 提示高亮 */
+.hint-src .card:last-child { box-shadow: 0 0 0 2px #00e0ff, 0 0 10px #00e0ff, 1px 1px 2px rgba(0,0,0,.45); }
+.hint-dst { box-shadow: inset 0 0 0 2px #00e0ff, inset 0 0 16px rgba(0,224,255,.5) !important; }
+.hint-dst .col-slot { box-shadow: inset 0 0 0 2px #00e0ff, inset 0 0 16px rgba(0,224,255,.6); }
+
+/* ---- 拖动层 ---- */
+
+.drag-layer {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 50;
+}
+.drag-stack { position: absolute; }
+.drag-stack .card { box-shadow: 0 6px 14px rgba(0,0,0,.45), 0 0 0 1px #6b6b6b; }
+
+/* ---- Toast ---- */
+
+.toast {
+  position: absolute; left: 50%; bottom: 18px;
+  transform: translateX(-50%);
+  background: #ffffe1;
+  color: #000;
+  border: 1px solid #000;
+  box-shadow: 2px 2px 0 rgba(0,0,0,.4);
+  padding: 6px 12px;
+  z-index: 60;
+  white-space: nowrap;
+  max-width: 92%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- 胜利动画 ---- */
+
+.win-banner {
+  position: absolute; left: 50%; top: 42%;
+  transform: translate(-50%, -50%);
+  background: var(--face);
+  padding: 14px 26px 16px;
+  text-align: center;
+  z-index: 70;
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
+              inset -2px -2px 0 var(--dark), inset 2px 2px 0 #dfdfdf,
+              4px 4px 0 rgba(0,0,0,.45);
+}
+.win-banner h3 { font-size: 16px; color: var(--navy); margin-bottom: 4px; letter-spacing: 2px; }
+.win-banner p { font-size: 12px; margin-bottom: 10px; }
+.win-banner .btn { min-width: 84px; }
+
+.bouncing { position: absolute; z-index: 65; pointer-events: none; }
+.bouncing .card { box-shadow: 0 2px 6px rgba(0,0,0,.35), 0 0 0 1px #6b6b6b; }
+
+/* ================================ 规则说明 ================================ */
+
+.rules {
+  max-width: 680px;
+  color: #e8fffb;
+  font-size: 13px;
+}
+.rules h2 {
+  font-size: 15px;
+  margin-bottom: 8px;
+  color: #fff;
+  letter-spacing: 2px;
+}
+.rules p, .rules li { color: #d4f5ef; }
+.rules ul { padding-left: 22px; margin: 6px 0; }
+.rules li { margin: 3px 0; }
+.rules strong { color: #fff; }
+.fail-tip { font-size: 12px; opacity: .85; margin-top: 6px; }
+
+/* ================================ 响应式 ================================ */
+
+@media (max-width: 760px) {
+  :root {
+    --card-w: 60px;
+    --gap: 5px;
+    --fan-ratio: 0.24;
+    --fan-down-ratio: 0.24;
+  }
+  .desktop { padding: 12px 6px 28px; gap: 12px; }
+  .tbtns { display: none; }
+  .status-mid .btn { min-width: 48px; padding: 2px 5px; }
+  .rules { font-size: 12px; }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --card-w: 46px;
+    --gap: 3px;
+  }
+  .status-mid { gap: 2px; }
+  .status-mid .btn { min-width: 40px; font-size: 11px; padding: 2px 3px; }
+  .led-digit { width: 10px; height: 18px; }
+  .rules { max-width: 100%; }
+}
+
+@media (max-width: 420px) {
+  :root { --card-w: 36px; --gap: 2px; }
+  .card .corner .r { font-size: 11px; }
+  .card .corner .s { font-size: 9px; }
+  .card .pip { font-size: 10px; }
+  .card .court .letter { font-size: 15px; }
+  .card .court .suit { font-size: 10px; }
+  .card .ace { font-size: 22px; }
+}
