@@ -1,0 +1,483 @@
+/* 纸牌接龙（Klondike）引擎：纯逻辑，零 DOM 依赖
+   源码：src/engine.ts → 编译产物：dist/engine.js（随仓库提交）
+   浏览器：<script src="dist/engine.js"></script> → window.Solitaire
+   Node：  const Solitaire = require('./engine.js')
+
+   规则（经典 Windows 纸牌）：
+   - 7 列牌阵：第 n 列 n 张，仅最上面一张明牌；其余 24 张进牌库
+   - 牌阵内红黑交替、点数递减；空列只接 K
+   - 收牌区同花色从 A 到 K 依次累积；双击/自动送入
+   - 牌库支持「每次翻 1 张 / 3 张」；翻完可由废牌堆整体回收（保持物理翻堆顺序）
+   - 任一列移走牌后自动翻开新顶牌
+   - 收牌区集齐 52 张即胜利；计时从第一次操作开始、胜利冻结
+   - 撤销保存完整快照（含自动翻牌与胜负状态），不限步数但限制内存（最近 200 步） */
+
+/* ---- 领域类型（脚本式全局作用域，ui.ts / test.ts / uitest.ts 共用） ---- */
+type Suit = 'S' | 'H' | 'D' | 'C';
+type Phase = 'playing' | 'won';
+type PassCount = 1 | 3;
+
+interface Card { suit: Suit; rank: number; faceUp: boolean }
+
+type PileRef =
+  | { kind: 'stock' }
+  | { kind: 'waste' }
+  | { kind: 'foundation'; suit: Suit }
+  | { kind: 'tableau'; index: number };
+
+interface DrawResult { drawn: number; recycled: boolean }
+interface MoveResult { ok: boolean; reason: string }
+
+interface Hint { from: PileRef; count: number; to: PileRef; text: string }
+
+interface SolitaireInstance {
+  readonly passCount: PassCount;
+  readonly phase: Phase;
+  readonly moves: number;
+  readonly stockCount: number;
+  readonly wasteCount: number;
+  /** 收牌区某花色的牌数（0–13） */
+  foundationCount(suit: Suit): number;
+  /** 某列的牌数 */
+  tableauCount(index: number): number;
+  /** 只读牌视图（复制；调用方拿不到内部对象） */
+  cardsAt(loc: PileRef): Card[];
+  topCard(loc: PileRef): Card | null;
+  /** 本次可拖动的牌组是否合法（不改变状态） */
+  canMove(from: PileRef, count: number, to: PileRef): boolean;
+  /** 执行移动；失败返回 ok:false + 原因（规则不允许 / 无可移动牌） */
+  move(from: PileRef, count: number, to: PileRef): MoveResult;
+  /** 从牌库翻牌；牌库空时回收废牌堆。drawn=0 且 recycled=false 表示彻底没牌可翻 */
+  draw(): DrawResult;
+  /** 双击：把单张顶牌送进收牌区；成功返回花色 */
+  autoMove(from: PileRef): Suit | null;
+  /** 撤销上一步；无历史返回 false */
+  undo(): boolean;
+  /** 提示：返回一条当前最值得执行的合法走法；无路可走返回 null */
+  hint(): Hint | null;
+  /** 自动完成是否可用：牌库与废牌堆清空且牌阵全部明牌 */
+  canAutoFinish(): boolean;
+  /** 自动完成推进一步（每次移动一张到收牌区） */
+  autoFinishStep(): boolean;
+  /** 重新发牌（保留抽牌模式） */
+  restart(passCount?: PassCount): void;
+  /** 秒；首次操作前为 0；胜利后冻结 */
+  elapsed(): number;
+  /** 牌面是否全明（胜利动画 / 自动完成的判断依据） */
+  allFaceUp(): boolean;
+}
+
+/** 测试与 UI 共用的常量与纯函数 */
+interface SolitaireAPI {
+  Solitaire: SolitaireCtor;
+  SUITS: Suit[];
+  isRed(card: Card): boolean;
+  rankLabel(rank: number): string;
+  suitLabel(suit: Suit): string;
+  sameLocation(a: PileRef, b: PileRef): boolean;
+  foundationBase(suit: Suit): number;
+}
+
+interface SolitaireCtor {
+  new (rand?: () => number, clock?: () => number, passCount?: PassCount): SolitaireInstance;
+  /** 测试专用：用显式牌局构造（不洗牌） */
+  planted(spec: PlantedSpec, clock?: () => number, passCount?: PassCount): SolitaireInstance;
+}
+
+interface PlantedSpec {
+  stock?: CardSpec[];
+  waste?: CardSpec[];
+  foundations?: Partial<Record<Suit, CardSpec[]>>;
+  tableau?: CardSpec[][];
+}
+
+type CardSpec = [Suit, number, boolean?];
+
+(function (root: any, factory: () => SolitaireAPI) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.Solitaire = factory();
+})(typeof self !== 'undefined' ? self : this, function (): SolitaireAPI {
+  'use strict';
+
+  const SUITS: Suit[] = ['S', 'H', 'D', 'C'];
+  const RANK_LABEL = ['', 'A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+  const SUIT_LABEL: Record<Suit, string> = { S: '黑桃', H: '红桃', D: '方块', C: '梅花' };
+  const MAX_SECONDS = 5999;
+  const UNDO_LIMIT = 200;
+
+  const isRed = (c: Card): boolean => c.suit === 'H' || c.suit === 'D';
+  const rankLabel = (r: number): string => RANK_LABEL[r] ?? '?';
+  const suitLabel = (s: Suit): string => SUIT_LABEL[s] ?? '?';
+  const foundationBase = (s: Suit): number => SUITS.indexOf(s);
+
+  function sameLocation(a: PileRef, b: PileRef): boolean {
+    if (a.kind !== b.kind) return false;
+    if (a.kind === 'foundation' && b.kind === 'foundation') return a.suit === b.suit;
+    if (a.kind === 'tableau' && b.kind === 'tableau') return a.index === b.index;
+    return true;
+  }
+
+  function locationText(loc: PileRef): string {
+    switch (loc.kind) {
+      case 'stock': return '牌库';
+      case 'waste': return '废牌堆';
+      case 'foundation': return '收牌区';
+      case 'tableau': return '第 ' + (loc.index + 1) + ' 列';
+    }
+  }
+
+  const defaultClock: () => number =
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? () => performance.now()
+      : () => Date.now();
+
+  function makeDeck(): Card[] {
+    const deck: Card[] = [];
+    for (const suit of SUITS) for (let rank = 1; rank <= 13; rank++) deck.push({ suit, rank, faceUp: false });
+    return deck;
+  }
+
+  interface Snapshot {
+    stock: Card[]; waste: Card[];
+    foundations: Record<Suit, Card[]>;
+    tableau: Card[][];
+    moves: number; phase: Phase;
+    startedAt: number | null; endedAt: number | null;
+  }
+
+  const cloneCard = (c: Card): Card => ({ suit: c.suit, rank: c.rank, faceUp: c.faceUp });
+
+  class SolitaireImpl implements SolitaireInstance {
+    private rand: () => number;
+    private clock: () => number;
+    private _passCount: PassCount;
+    private stock: Card[] = [];
+    private waste: Card[] = [];
+    private foundations: Record<Suit, Card[]> = { S: [], H: [], D: [], C: [] };
+    private tableau: Card[][] = [];
+    private history: Snapshot[] = [];
+    private _moves = 0;
+    private _phase: Phase = 'playing';
+    private _startedAt: number | null = null;
+    private _endedAt: number | null = null;
+
+    constructor(rand: () => number = Math.random, clock: () => number = defaultClock, passCount: PassCount = 1) {
+      this.rand = rand;
+      this.clock = clock;
+      this._passCount = SolitaireImpl.normalizePass(passCount);
+      this.deal();
+    }
+
+    private static normalizePass(p: number): PassCount {
+      if (p !== 1 && p !== 3) throw new Error('抽牌模式非法：' + p);
+      return p;
+    }
+
+    /** 测试专用：显式牌局构造，便于覆盖边界规则 */
+    static planted(spec: PlantedSpec, clock: () => number = defaultClock, passCount: PassCount = 1): SolitaireInstance {
+      const e = new SolitaireImpl(() => 0.5, clock, passCount);
+      const conv = (list: CardSpec[] | undefined): Card[] =>
+        (list ?? []).map(([suit, rank, faceUp]) => ({ suit, rank, faceUp: faceUp ?? true }));
+      e.stock = conv(spec.stock);
+      e.waste = conv(spec.waste);
+      e.foundations = { S: [], H: [], D: [], C: [] };
+      for (const s of SUITS) e.foundations[s] = conv(spec.foundations?.[s]);
+      e.tableau = (spec.tableau ?? []).map((pile) => conv(pile));
+      while (e.tableau.length < 7) e.tableau.push([]);
+      e.history = [];
+      e._moves = 0;
+      e._phase = 'playing';
+      e._startedAt = null;
+      e._endedAt = null;
+      return e;
+    }
+
+    private deal(): void {
+      const deck = makeDeck();
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(this.rand() * (i + 1));
+        const t = deck[i]; deck[i] = deck[j]; deck[j] = t;
+      }
+      this.stock = []; this.waste = []; this.history = [];
+      this.foundations = { S: [], H: [], D: [], C: [] };
+      this.tableau = [];
+      for (let col = 0; col < 7; col++) {
+        const pile: Card[] = [];
+        for (let row = 0; row <= col; row++) {
+          const c = deck.pop() as Card;
+          c.faceUp = row === col;
+          pile.push(c);
+        }
+        this.tableau.push(pile);
+      }
+      while (deck.length) {
+        const c = deck.pop() as Card;
+        c.faceUp = false;
+        this.stock.push(c);
+      }
+      this._moves = 0;
+      this._phase = 'playing';
+      this._startedAt = null;
+      this._endedAt = null;
+    }
+
+    restart(passCount?: PassCount): void {
+      if (passCount !== undefined) this._passCount = SolitaireImpl.normalizePass(passCount);
+      this.deal();
+    }
+
+    /* ---- 只读视图 ---- */
+
+    get passCount(): PassCount { return this._passCount; }
+    get phase(): Phase { return this._phase; }
+    get moves(): number { return this._moves; }
+    get stockCount(): number { return this.stock.length; }
+    get wasteCount(): number { return this.waste.length; }
+
+    foundationCount(suit: Suit): number { return this.foundations[suit].length; }
+    tableauCount(index: number): number { return this.tableau[index]?.length ?? 0; }
+
+    private pile(loc: PileRef): Card[] {
+      switch (loc.kind) {
+        case 'stock': return this.stock;
+        case 'waste': return this.waste;
+        case 'foundation': return this.foundations[loc.suit];
+        case 'tableau': return this.tableau[loc.index] ?? [];
+      }
+    }
+
+    cardsAt(loc: PileRef): Card[] {
+      if (loc.kind === 'tableau' && !this.tableau[loc.index]) return [];
+      return this.pile(loc).map(cloneCard);
+    }
+
+    topCard(loc: PileRef): Card | null {
+      const p = this.pile(loc);
+      return p.length ? cloneCard(p[p.length - 1]) : null;
+    }
+
+    allFaceUp(): boolean {
+      return this.tableau.every((pile) => pile.every((c) => c.faceUp));
+    }
+
+    /* ---- 规则判定 ---- */
+
+    canMove(from: PileRef, count: number, to: PileRef): boolean {
+      if (from.kind === 'stock') return false;
+      if (to.kind === 'stock' || to.kind === 'waste') return false;
+      if (sameLocation(from, to)) return false;
+      if (!Number.isInteger(count) || count < 1) return false;
+      const src = this.pile(from);
+      if (count > src.length) return false;
+      const moving = src.slice(src.length - count);
+      if (moving.some((c) => !c.faceUp)) return false;
+      if (to.kind === 'foundation') {
+        if (count !== 1) return false;
+        if (to.suit !== moving[0].suit) return false;
+        return moving[0].rank === this.foundations[to.suit].length + 1;
+      }
+      const dst = this.tableau[to.index];
+      if (!dst) return false;
+      if (dst.length === 0) return moving[0].rank === 13;
+      const top = dst[dst.length - 1];
+      return top.faceUp && top.rank === moving[0].rank + 1 && isRed(top) !== isRed(moving[0]);
+    }
+
+    /* ---- 状态变更 ---- */
+
+    private touch(): void {
+      if (this._startedAt === null) this._startedAt = this.clock();
+    }
+
+    private snapshot(): Snapshot {
+      return {
+        stock: this.stock.map(cloneCard),
+        waste: this.waste.map(cloneCard),
+        foundations: {
+          S: this.foundations.S.map(cloneCard), H: this.foundations.H.map(cloneCard),
+          D: this.foundations.D.map(cloneCard), C: this.foundations.C.map(cloneCard),
+        },
+        tableau: this.tableau.map((p) => p.map(cloneCard)),
+        moves: this._moves, phase: this._phase,
+        startedAt: this._startedAt, endedAt: this._endedAt,
+      };
+    }
+
+    private pushHistory(): void {
+      this.history.push(this.snapshot());
+      if (this.history.length > UNDO_LIMIT) this.history.shift();
+    }
+
+    private checkWin(): void {
+      const total = SUITS.reduce((n, s) => n + this.foundations[s].length, 0);
+      if (total === 52 && this._phase !== 'won') {
+        this._phase = 'won';
+        this._endedAt = this.clock();
+      }
+    }
+
+    move(from: PileRef, count: number, to: PileRef): MoveResult {
+      if (this._phase === 'won') return { ok: false, reason: '本局已结束' };
+      if (!this.canMove(from, count, to)) {
+        if (from.kind === 'stock') return { ok: false, reason: '牌库的牌需要先翻开' };
+        return { ok: false, reason: '这两叠牌不能这样叠放' };
+      }
+      this.pushHistory();
+      this.touch();
+      const src = this.pile(from);
+      const moving = src.splice(src.length - count, count);
+      if (from.kind === 'tableau') {
+        const left = this.tableau[from.index];
+        if (left.length && !left[left.length - 1].faceUp) left[left.length - 1].faceUp = true;
+      }
+      const dst = this.pile(to);
+      for (const c of moving) { c.faceUp = true; dst.push(c); }
+      this._moves++;
+      this.checkWin();
+      return { ok: true, reason: '' };
+    }
+
+    draw(): DrawResult {
+      if (this._phase === 'won') return { drawn: 0, recycled: false };
+      if (this.stock.length === 0) {
+        if (this.waste.length === 0) return { drawn: 0, recycled: false };
+        this.pushHistory();
+        this.touch();
+        // 物理翻堆：整叠掉头后扣回牌库，原废牌堆顶变成新牌库底
+        this.stock = this.waste.slice().reverse().map((c) => ({ suit: c.suit, rank: c.rank, faceUp: false }));
+        this.waste = [];
+        this._moves++;
+        return { drawn: 0, recycled: true };
+      }
+      this.pushHistory();
+      this.touch();
+      let drawn = 0;
+      for (let i = 0; i < this._passCount && this.stock.length; i++) {
+        const c = this.stock.pop() as Card;
+        c.faceUp = true;
+        this.waste.push(c);
+        drawn++;
+      }
+      this._moves++;
+      return { drawn, recycled: false };
+    }
+
+    autoMove(from: PileRef): Suit | null {
+      if (this._phase === 'won') return null;
+      const card = this.topCard(from);
+      if (!card || !card.faceUp) return null;
+      const target: PileRef = { kind: 'foundation', suit: card.suit };
+      if (!this.canMove(from, 1, target)) return null;
+      const r = this.move(from, 1, target);
+      return r.ok ? card.suit : null;
+    }
+
+    undo(): boolean {
+      const snap = this.history.pop();
+      if (!snap) return false;
+      this.stock = snap.stock;
+      this.waste = snap.waste;
+      this.foundations = snap.foundations;
+      this.tableau = snap.tableau;
+      this._moves = snap.moves;
+      this._phase = snap.phase;
+      this._startedAt = snap.startedAt;
+      this._endedAt = snap.endedAt;
+      return true;
+    }
+
+    /* ---- 提示 ---- */
+
+    hint(): Hint | null {
+      if (this._phase === 'won') return null;
+      const candidates: Array<Hint & { score: number }> = [];
+      const add = (from: PileRef, count: number, to: PileRef, text: string, score: number): void => {
+        if (this.canMove(from, count, to)) candidates.push({ from, count, to, text, score });
+      };
+      const cardText = (c: Card): string => suitLabel(c.suit) + rankLabel(c.rank);
+
+      // 收牌区优先：废牌堆 → 牌阵
+      const wasteTop = this.topCard({ kind: 'waste' });
+      if (wasteTop) {
+        add({ kind: 'waste' }, 1, { kind: 'foundation', suit: wasteTop.suit }, '把 ' + cardText(wasteTop) + ' 移到收牌区', 100);
+        for (let t = 0; t < 7; t++) {
+          add({ kind: 'waste' }, 1, { kind: 'tableau', index: t }, '把 ' + cardText(wasteTop) + ' 移到第 ' + (t + 1) + ' 列', 60);
+        }
+      }
+      for (let i = 0; i < 7; i++) {
+        const pile = this.tableau[i];
+        if (!pile.length) continue;
+        const top = pile[pile.length - 1];
+        if (top.faceUp) {
+          add({ kind: 'tableau', index: i }, 1, { kind: 'foundation', suit: top.suit }, '把 ' + cardText(top) + ' 移到收牌区', 100);
+        }
+        // 牌阵内部的整段移动：优先「能翻出暗牌」的走法
+        for (let start = pile.length - 1; start >= 0; start--) {
+          if (!pile[start].faceUp) break;
+          const count = pile.length - start;
+          const head = pile[start];
+          const reveals = start > 0 && !pile[start - 1].faceUp;
+          for (let t = 0; t < 7; t++) {
+            if (t === i) continue;
+            const dstEmpty = this.tableau[t].length === 0;
+            if (!this.canMove({ kind: 'tableau', index: i }, count, { kind: 'tableau', index: t })) continue;
+            if (dstEmpty && count === pile.length) continue;   // 整列平移到空列毫无意义
+            const score = reveals ? 80 : dstEmpty ? 55 : 10;
+            const text = '把 ' + cardText(head) + ' 连同下面 ' + (count - 1) + ' 张移到第 ' + (t + 1) + ' 列';
+            add({ kind: 'tableau', index: i }, count, { kind: 'tableau', index: t }, count > 1 ? text : '把 ' + cardText(head) + ' 移到第 ' + (t + 1) + ' 列', score);
+          }
+        }
+      }
+      if (this.stock.length || this.waste.length) {
+        candidates.push({
+          from: { kind: 'stock' }, count: 0, to: { kind: 'stock' },
+          text: this.stock.length ? '翻开牌库里的牌' : '回收废牌堆，重新翻牌',
+          score: this.stock.length ? 20 : 5,
+        });
+      }
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      return { from: best.from, count: best.count, to: best.to, text: best.text };
+    }
+
+    /* ---- 自动完成 ---- */
+
+    canAutoFinish(): boolean {
+      return this._phase === 'playing' && this.stock.length === 0 && this.waste.length === 0 && this.allFaceUp();
+    }
+
+    autoFinishStep(): boolean {
+      if (this._phase === 'won') return false;
+      const options: Array<{ from: PileRef; card: Card }> = [];
+      for (let i = 0; i < 7; i++) {
+        const pile = this.tableau[i];
+        const top = pile[pile.length - 1];
+        if (top && top.faceUp) options.push({ from: { kind: 'tableau', index: i }, card: top });
+      }
+      const wasteTop = this.waste[this.waste.length - 1];
+      if (wasteTop) options.push({ from: { kind: 'waste' }, card: wasteTop });
+      // 点数小的先送：A→2→3… 每次只送当前最底层可收的牌
+      options.sort((a, b) => a.card.rank - b.card.rank);
+      for (const opt of options) {
+        const target: PileRef = { kind: 'foundation', suit: opt.card.suit };
+        if (this.canMove(opt.from, 1, target)) {
+          this.move(opt.from, 1, target);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /* ---- 计时 ---- */
+
+    elapsed(): number {
+      if (this._startedAt === null) return 0;
+      const end = this._endedAt ?? this.clock();
+      const sec = Math.floor((end - this._startedAt) / 1000);
+      return Math.min(MAX_SECONDS, Math.max(0, sec));
+    }
+  }
+
+  return { Solitaire: SolitaireImpl, SUITS, isRed, rankLabel, suitLabel, sameLocation, foundationBase };
+});
