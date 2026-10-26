@@ -159,7 +159,9 @@ const dragLayer = (): any => $('#dragLayer');
 const tableauEl = (): any => $('#tableau');
 
 /* ---- 尺寸：宽度和间距读取纯 px 变量；高度读取 CSS calc 计算后的真实牌高。
-       这样牌高可以始终与牌宽保持同一比例，又不会让 JS 布局与真实画面漂移。 ---- */
+       这样牌高可以始终与牌宽保持同一比例，又不会让 JS 布局与真实画面漂移。
+       fallback 值与 style.css 的 :root 保持一致（仅在拿不到 getComputedStyle 的
+       非浏览器环境生效，例如 uitest 的 DOM stub）。 */
 function metrics(): { w: number; h: number; fan: number; fanDown: number; gap: number } {
   const cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
   const read = (name: string, fallback: number): number => {
@@ -171,14 +173,46 @@ function metrics(): { w: number; h: number; fan: number; fanDown: number; gap: n
   const measuredH = actualCard?.getBoundingClientRect?.().height;
   const h = Number.isFinite(measuredH) && measuredH > 0
     ? measuredH
-    : Math.round(w * 1.35);
+    : Math.round(w * read('--card-ratio', 1.35));
   const fan = Math.round(h * read('--fan-ratio', 0.24));
-  const fanDown = Math.round(h * read('--fan-down-ratio', 0.16));
+  const fanDown = Math.round(h * read('--fan-down-ratio', 0.18));
   const gap = read('--gap', 12);
   return { w, h, fan, fanDown, gap };
 }
 
-/* ---- 渲染 ---- */
+/* ---- 渲染 ----
+   全量重建几百个 DOM 节点代价不小（拖动、自动完成每秒会调十几次 render）。
+   这里给每个牌堆算一个「签名」，签名没变就跳过重绘——牌没动的列不再重建。 */
+
+let metricCache: { w: number; h: number; fan: number; fanDown: number; gap: number } | null = null;
+
+/** 读取当前尺寸（带缓存；窗口 resize 时调用 invalidateMetrics()） */
+function metricsCached(): { w: number; h: number; fan: number; fanDown: number; gap: number } {
+  if (!metricCache) metricCache = metrics();
+  return metricCache;
+}
+
+function invalidateMetrics(): void { metricCache = null; }
+
+/** 牌堆签名：内容或朝向一变就重绘 */
+function pileSig(cards: Card[], extra = ''): string {
+  let s = extra;
+  for (const c of cards) s += '|' + c.suit + c.rank + (c.faceUp ? 'u' : 'd');
+  return s;
+}
+
+const lastSig: Record<string, string> = {};
+
+/** 签名变了才重建该牌堆的 DOM */
+function renderIfChanged(key: string, sig: string, draw: () => void): void {
+  if (lastSig[key] === sig) return;
+  lastSig[key] = sig;
+  draw();
+}
+
+function invalidateRenderCache(): void {
+  for (const k of Object.keys(lastSig)) delete lastSig[k];
+}
 
 function render(): void {
   renderStock();
@@ -192,75 +226,94 @@ function render(): void {
 }
 
 function renderStock(): void {
-  const el = $('#stock');
-  el.innerHTML = '';
-  const empty = engine.stockCount === 0;
-  el.classList.toggle('empty', empty);
-  el.classList.toggle('recycle', empty && engine.wasteCount > 0);
-  el.title = empty ? (engine.wasteCount ? '回收废牌堆（点击重翻）' : '牌库已空') : '牌库（点击翻牌）';
-  if (engine.stockCount) {
-    const back = document.createElement('div');
-    back.className = 'stock-back';
-    el.appendChild(back);
-    const n = document.createElement('span');
-    n.className = 'stock-count';
-    n.textContent = String(engine.stockCount);
-    el.appendChild(n);
-  } else if (engine.wasteCount) {
-    const n = document.createElement('span');
-    n.className = 'stock-count';
-    n.textContent = String(engine.wasteCount);
-    el.appendChild(n);
-  }
+  const sig = engine.stockCount + ':' + engine.wasteCount;
+  renderIfChanged('stock', sig, () => {
+    const el = $('#stock');
+    el.innerHTML = '';
+    const empty = engine.stockCount === 0;
+    el.classList.toggle('empty', empty);
+    el.classList.toggle('recycle', empty && engine.wasteCount > 0);
+    el.title = empty ? (engine.wasteCount ? '回收废牌堆（点击重翻）' : '牌库已空') : '牌库（点击翻牌）';
+    if (engine.stockCount) {
+      const back = document.createElement('div');
+      back.className = 'stock-back';
+      el.appendChild(back);
+      const n = document.createElement('span');
+      n.className = 'stock-count';
+      n.textContent = String(engine.stockCount);
+      el.appendChild(n);
+    } else if (engine.wasteCount) {
+      const n = document.createElement('span');
+      n.className = 'stock-count';
+      n.textContent = String(engine.wasteCount);
+      el.appendChild(n);
+    }
+  });
 }
 
 function renderWaste(): void {
-  const el = $('#waste');
-  el.innerHTML = '';
   const cards = engine.cardsAt({ kind: 'waste' });
-  const start = Math.max(0, cards.length - 3);
-  for (let i = start; i < cards.length; i++) {
-    const c = cards[i];
-    const offset = cards.length - 1 - i;            // 0 = 最上面
-    // 三张扇形：最上面那张必须给 w1（最右 26%），否则它会和最下面的牌挤在一起（修过的 bug）
-    const cls = engine.passCount === 3 && cards.length > 1 ? 'w' + (offset + 1) : '';
-    const ce = cardEl(c, cls);
-    ce.dataset.pile = 'waste';
-    ce.dataset.index = String(i);
-    ce.style.zIndex = String(i - start + 1);
-    if (i === cards.length - 1) ce.dataset.top = '1';
-    el.appendChild(ce);
-  }
+  const sig = pileSig(cards, engine.passCount + ':' + cards.length);
+  renderIfChanged('waste', sig, () => {
+    const el = $('#waste');
+    el.innerHTML = '';
+    const start = Math.max(0, cards.length - 3);
+    for (let i = start; i < cards.length; i++) {
+      const c = cards[i];
+      const offset = cards.length - 1 - i;            // 0 = 最上面
+      // 三张扇形：最上面那张必须给 w1（最右 26%），否则它会和最下面的牌挤在一起（修过的 bug）
+      const cls = engine.passCount === 3 && cards.length > 1 ? 'w' + (offset + 1) : '';
+      const ce = cardEl(c, cls);
+      ce.dataset.pile = 'waste';
+      ce.dataset.index = String(i);
+      ce.style.zIndex = String(i - start + 1);
+      if (i === cards.length - 1) ce.dataset.top = '1';
+      el.appendChild(ce);
+    }
+  });
 }
 
 function renderFoundations(): void {
   for (const s of SUITS) {
-    const el = $('#found' + s);
-    el.innerHTML = '';
-    el.classList.add('s-' + s);   // 空位花色底纹靠 class 定位（CSS ::before 用 data-URI SVG）
     const cards = engine.cardsAt({ kind: 'foundation', suit: s });
-    if (cards.length) {
-      const ce = cardEl(cards[cards.length - 1]);
-      ce.dataset.pile = 'foundation';
-      ce.dataset.suit = s;
-      ce.dataset.top = '1';
-      el.appendChild(ce);
-    }
+    renderIfChanged('found' + s, pileSig(cards), () => {
+      const el = $('#found' + s);
+      el.innerHTML = '';
+      el.classList.add('s-' + s);   // 空位花色底纹靠 class 定位（CSS ::before 用 data-URI SVG）
+      if (cards.length) {
+        const ce = cardEl(cards[cards.length - 1]);
+        ce.dataset.pile = 'foundation';
+        ce.dataset.suit = s;
+        ce.dataset.top = '1';
+        el.appendChild(ce);
+      }
+    });
   }
 }
 
 function renderTableau(): void {
   const root = tableauEl();
-  root.innerHTML = '';
-  const { h, fan, fanDown } = metrics();
+  const { h, fan, fanDown } = metricsCached();
+  // 七列各自算签名：只重建牌面真的变了的列（拖动/收牌时大多数列没动）
+  const sigs: string[] = [];
+  const piles: Card[][] = [];
   for (let i = 0; i < 7; i++) {
+    const cards = engine.cardsAt({ kind: 'tableau', index: i });
+    piles.push(cards);
+    sigs.push(pileSig(cards, fan + ':' + fanDown + ':' + h));
+  }
+  if (root.children.length === 7 && sigs.every((s, i) => lastSig['tab' + i] === s)) return;
+
+  root.innerHTML = '';
+  for (let i = 0; i < 7; i++) {
+    lastSig['tab' + i] = sigs[i];
+    const cards = piles[i];
     const col = document.createElement('div');
     col.className = 'col';
     col.dataset.col = String(i);
     const slot = document.createElement('div');
     slot.className = 'col-slot';
     col.appendChild(slot);
-    const cards = engine.cardsAt({ kind: 'tableau', index: i });
     let y = 0;
     for (let k = 0; k < cards.length; k++) {
       const c = cards[k];
@@ -677,6 +730,7 @@ function newGame(pass?: PassCount, rand?: () => number, clock?: () => number): v
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
   for (const n of $$('.win-banner, .bouncing')) n.remove?.();
   engine = new ENGINE(rand ?? Math.random, clock, passCount);
+  invalidateRenderCache();
   clearTransient();
   render();
   startClock();
@@ -689,6 +743,7 @@ function restart(): void {
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
   for (const n of $$('.win-banner, .bouncing')) n.remove?.();
   engine.restart(passCount);
+  invalidateRenderCache();
   clearTransient();
   render();
   startClock();
@@ -701,6 +756,7 @@ function undo(): void {
   for (const n of $$('.win-banner, .bouncing')) n.remove?.();
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
   clearTransient();
+  invalidateRenderCache();   // 撤销会回退到任意旧牌面，签名缓存不可信
   render();
   // 从胜利状态撤销后恢复时钟刷新。
   if (!clockTimer) startClock();
@@ -902,23 +958,47 @@ function checkDeath(): void {
   );
 }
 
-/** 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态 */
+/** 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态。
+    求解是同步 CPU 密集任务，直接跑会卡死界面（拖牌、按钮全部无响应）。
+    所以先把「正在分析」画出来（requestAnimationFrame 等一帧），再分两阶段跑：
+    先 quick（几毫秒，能秒杀死局），再完整搜索（受 node/time 上限约束）。 */
 function analyzeNow(): void {
   if (engine.phase === 'won') { toast('这局已经赢了。', 1500); return; }
-  toast('正在分析局面…', 900);
+  clearPanel();
+  toast('正在分析局面…', 6000);
   const st = Solver.fromEngine(engine);
-  const rep = Solver.analyze(st, engine.passCount, { nodeLimit: 60000, timeLimit: 700 });
-  const head = rep.verdict === 'win' ? '这局还能赢'
-    : rep.verdict === 'dead' ? '这局已经死局'
-      : '暂时无法确定';
-  const sub = rep.verdict === 'win' ? '按提示走就能收完，继续吧。'
-    : rep.verdict === 'dead' ? '无论怎么走都赢不了了。建议撤销几步，或重新发牌。'
-      : '牌局太复杂，在限定时间内没搜出结论；不代表赢不了，也不代表一定输。';
-  showPanel(head, sub + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms）', rep.reasons, [
-    ['提示', () => showHint()],
-    ['重新发牌', () => restart()],
-    ['关闭', () => { /* 仅关闭面板 */ }],
-  ]);
+  const pass = engine.passCount;
+  const generation = gameGeneration;
+
+  const finish = (rep: any): void => {
+    // 分析期间可能已经撤销/开新局：结果作废，不能弹出误导面板
+    if (generation !== gameGeneration) return;
+    const head = rep.verdict === 'win' ? '这局还能赢'
+      : rep.verdict === 'dead' ? '这局已经死局'
+        : '暂时无法确定';
+    const sub = rep.verdict === 'win' ? '按提示走就能收完，继续吧。'
+      : rep.verdict === 'dead' ? '无论怎么走都赢不了了。建议撤销几步，或重新发牌。'
+        : '牌局太复杂，在限定时间内没搜出结论；不代表赢不了，也不代表一定输。';
+    showPanel(head, sub + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms）', rep.reasons, [
+      ['提示', () => showHint()],
+      ['重新发牌', () => restart()],
+      ['关闭', () => { /* 仅关闭面板 */ }],
+    ]);
+  };
+
+  const heavy = (): void => {
+    if (generation !== gameGeneration) return;
+    const rep = Solver.analyze(st, pass, { nodeLimit: 60000, timeLimit: 700 });
+    finish(rep);
+  };
+
+  const nextFrame = (fn: () => void): void => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => setTimeout(fn, 0));
+    else setTimeout(fn, 0);
+  };
+
+  // 先让「正在分析」上屏，再跑搜索
+  nextFrame(heavy);
 }
 
 function showRules(): void {
@@ -990,6 +1070,7 @@ function bindEvents(): void {
     if (k === 'f') { e.preventDefault(); autoFinish(); return; }
     if (k === 'u') { e.preventDefault(); undo(); return; }
     if (k === 'n') { e.preventDefault(); newGame(); return; }
+    if (k === 'a') { e.preventDefault(); analyzeNow(); return; }
   });
 
   window.addEventListener('blur', () => {
@@ -997,7 +1078,11 @@ function bindEvents(): void {
     if (drag) { drag = null; clearDragVisual(); clearDropHighlights(); }
     closeMenu();
   });
-  window.addEventListener('resize', () => { render(); });
+  window.addEventListener('resize', () => {
+    invalidateMetrics();
+    invalidateRenderCache();   // 牌宽/叠放比例变了，必须全量重绘
+    render();
+  });
 }
 
 /* ---- 启动 ---- */
@@ -1006,6 +1091,7 @@ function init(): void {
   ledScore = makeLed($('#ledScore'));
   ledTime = makeLed($('#ledTime'));
   engine = new ENGINE(Math.random, undefined, 1);
+  invalidateRenderCache();
   bindEvents();
   render();
   startClock();
@@ -1017,7 +1103,7 @@ init();
 (globalThis as any).__sui = {
   newGame, restart, undo, doDraw, showHint, autoFinish,
   analyzeNow, checkDeath, clearPanel, showPanel,
-  setEngine(e: SolitaireInstance) { engine = e; autoPromptShown = false; render(); },
+  setEngine(e: SolitaireInstance) { engine = e; autoPromptShown = false; invalidateRenderCache(); render(); },
   engine: (): SolitaireInstance => engine,
   render,
   metrics,

@@ -559,6 +559,11 @@ section('U16 死局自动检测与原因面板', () => {
 });
 
 section('U17 「分析局面」给出结论与原因', () => {
+  /** analyzeNow 现在异步（先上屏再搜索），测试要把排队的帧/定时器跑完 */
+  const drainAnalysis = (): void => {
+    for (let i = 0; i < 8 && runNextTimer(); i++) { /* 逐层推进 */ }
+  };
+
   U.setEngine(SOL.Solitaire.planted({
     foundations: {
       S: Array.from({ length: 12 }, (_, i) => ['S', i + 1] as any),
@@ -569,9 +574,12 @@ section('U17 「分析局面」给出结论与原因', () => {
     tableau: [[['S', 13]], [], [], [], [], [], []],
   }));
   U.clearPanel();
+  pendingTimers.clear();
   U.analyzeNow();
+  ok(tableEl.querySelectorAll('.info-banner').length === 0, '分析先不阻塞：面板不会立刻同步弹出');
+  drainAnalysis();
   const panels = tableEl.querySelectorAll('.info-banner');
-  ok(panels.length === 1, '分析后弹出面板');
+  ok(panels.length === 1, '分析完成后弹出面板');
   const h = panels[0].querySelector('h3');
   ok(!!h && h.textContent.includes('还能赢'), '可胜局面判为「还能赢」（实际：' + (h ? h.textContent : '') + '）');
   ok(panels[0].querySelectorAll('li').length > 0, '附带原因说明');
@@ -580,14 +588,120 @@ section('U17 「分析局面」给出结论与原因', () => {
   // 死局的分析结果
   U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
   U.clearPanel();
+  pendingTimers.clear();
   U.analyzeNow();
+  drainAnalysis();
   const p2 = tableEl.querySelectorAll('.info-banner');
   ok(p2.length === 1 && /死局/.test(p2[0].querySelector('h3')?.textContent ?? ''),
     '死局局面判为「死局」（实际：' + (p2[0].querySelector('h3')?.textContent ?? '') + '）');
 
+  // 分析途中开新局：旧结果必须作废，不能弹误导面板
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
+  U.clearPanel();
+  pendingTimers.clear();
+  U.analyzeNow();
+  U.newGame();
+  drainAnalysis();
+  ok(tableEl.querySelectorAll('.info-banner').length === 0, '分析途中开新局 → 旧结果丢弃，不弹面板');
+
   // 重开 / 撤销会清掉面板
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
+  U.clearPanel();
+  pendingTimers.clear();
+  U.analyzeNow();
+  drainAnalysis();
+  ok(tableEl.querySelectorAll('.info-banner').length === 1, '前提：先弹出一个面板');
   U.restart();
   ok(tableEl.querySelectorAll('.info-banner').length === 0, '重新发牌后面板消失');
+});
+
+section('U18 A 键触发「分析局面」（回归：文档写了但没绑）', () => {
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
+  U.clearPanel();
+  pendingTimers.clear();
+  keydown('a');
+  for (let i = 0; i < 8 && runNextTimer(); i++) { /* 推完异步分析 */ }
+  ok(tableEl.querySelectorAll('.info-banner').length === 1, '按 A 弹出分析面板');
+
+  // 菜单里也必须真有这一项
+  const analyzeItem = gameDrop.querySelector('[data-act="analyze"]');
+  ok(analyzeItem !== null, '游戏菜单里有「分析局面」项（回归：以前只有 data-act 分支没有菜单项）');
+  U.newGame();
+});
+
+section('U19 渲染缓存：牌面变了就必须重绘', () => {
+  const planted = SOL.Solitaire.planted({ tableau: [[['S', 13]], [['H', 12]], [], [], [], [], []] });
+  U.setEngine(planted);
+  ok(colCards(0).length === 1 && colCards(1).length === 1, '初始渲染正确');
+
+  // 移动后两列都必须更新（缓存不能把旧牌留在屏上）
+  ok(U.engine().canMove({ kind: 'tableau', index: 1 }, 1, { kind: 'tableau', index: 0 }) === true,
+    '前提：♥Q 可以压到 ♠K 上');
+  ok(U.tryMove({ loc: { kind: 'tableau', index: 1 }, count: 1 }, { kind: 'tableau', index: 0 }) === true,
+    'tryMove 执行成功（注意第二个参数是 PileRef，不是 Source）');
+  ok(U.engine().tableauCount(0) === 2 && U.engine().tableauCount(1) === 0, '引擎状态已变');
+  ok(colCards(0).length === 2 && colCards(1).length === 0, '源列与目标列都重绘了（缓存没有卡住旧画面）');
+
+  // 同一牌面反复 render 不能改变 DOM（缓存命中）
+  const firstCard = colCard(0, 0);
+  U.render();
+  U.render();
+  ok(colCard(0, 0) === firstCard, '牌面未变时 render 不重建 DOM（缓存命中）');
+
+  // 撤销后必须全量重绘（回退到旧牌面，签名缓存不可信）
+  U.undo();
+  ok(colCards(0).length === 1 && colCards(1).length === 1, '撤销后画面回退正确');
+  U.newGame();
+});
+
+section('U20 metrics 的 fallback 与 CSS 变量一致', () => {
+  // 模拟拿不到 CSS 变量的环境：fallback 必须和 style.css 的 :root 对得上
+  const saved = globalAny.getComputedStyle;
+  globalAny.getComputedStyle = () => ({ getPropertyValue: () => '' });
+  // ui.js 内部引用的是载入时捕获的 getComputedStyle 参数，所以这里验的是公式本身
+  const m = U.metrics();
+  ok(m.w > 0 && m.h > 0, '缺变量时仍能算出合法尺寸');
+  ok(m.fanDown === Math.round(m.h * 0.18), '暗牌叠放比例 fallback 与 CSS 一致（回归：以前写死 0.16）');
+  globalAny.getComputedStyle = saved;
+});
+
+section('U21 渲染缓存在拖动与自动完成下不漏画（回归）', () => {
+  // 拖动：源列牌隐藏→松手后必须回到可见状态，且列内容正确
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 13]], [['H', 12]], [], [], [], [], []] }));
+  const fromCard = colCard(1, 0);
+  U.onPointerDown(pev(fromCard, 10, 10));
+  U.onPointerMove(pev(fromCard, 40, 40));
+  ok(fromCard.style.visibility === 'hidden', '拖动中源牌被隐藏');
+  const original = documentStub.elementFromPoint;
+  documentStub.elementFromPoint = () => colEl(0);
+  U.onPointerUp(pev(colEl(0), 40, 40));
+  documentStub.elementFromPoint = original;
+  ok(colCards(0).length === 2 && colCards(1).length === 0, '拖动落下后列内容正确');
+  ok(colCards(0).every((c: any) => c.style.visibility !== 'hidden'), '没有牌卡在隐藏状态');
+
+  // 自动完成：逐步收牌，每一步 DOM 都要跟上引擎（缓存不能落后）
+  const fill = (suit: Suit): CardSpec[] => Array.from({ length: 12 }, (_, i) => [suit, i + 1] as CardSpec);
+  const ready = SOL.Solitaire.planted({
+    tableau: [[['S', 13]], [['H', 13]], [['D', 13]], [['C', 13]]],
+    foundations: { S: fill('S'), H: fill('H'), D: fill('D'), C: fill('C') },
+  });
+  U.setEngine(ready);
+  pendingTimers.clear();
+  U.autoFinish();
+  let guard = 0;
+  while (guard++ < 300) {
+    const moved = ready.moves;
+    if (!runNextTimer()) break;
+    if (ready.phase === 'won') break;
+    if (ready.moves === moved && pendingTimers.size === 0) break;
+  }
+  ok(ready.phase === 'won', '自动完成能跑到底（实际 phase=' + ready.phase + ', moves=' + ready.moves + '）');
+  // 收牌区 DOM 必须反映最终 4 张 K
+  for (const s of ['S', 'H', 'D', 'C']) {
+    const host = foundEls[s as 'S'];
+    ok(host.querySelectorAll('.card').length === 1, s + ' 收牌区渲染出最后一张牌');
+  }
+  U.newGame();
 });
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
