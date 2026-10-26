@@ -49,7 +49,7 @@
         const top = target[last];
         return rankOf(top) === rankOf(head) + 1 && isRedIdx(top) !== isRedIdx(head);
     }
-    /** 还有没有没翻开的暗牌（决定是否需要重排类走法） */
+    /** 还有没有没翻开的暗牌（诊断与剪枝用） */
     function hasHidden(st) {
         for (let i = 0; i < 7; i++)
             for (let j = 0; j < st.up[i].length; j++)
@@ -99,24 +99,25 @@
                     out.push({ kind: 'w2t', to: j });
         }
         // 收牌区的牌可以移回牌阵（这是引擎允许的自救手段）。
-        // 但只在「还有暗牌没翻开」时才生成：全明之后把牌从收牌区移回来只是原地打转，
-        // 会产生组合爆炸（验证过：一个 4 张牌的局面能撑到 4 万节点）。
-        // 暗牌存在时才可能真的需要重排来解锁，这时才允许。
-        if (hasHidden(st)) {
-            for (let s = 0; s < 4; s++) {
-                if (st.found[s] === 0)
-                    continue;
-                const card = cardIndex(SUIT_ORDER[s], st.found[s]);
-                for (let j = 0; j < 7; j++)
-                    if (canPlace(st, card, j))
-                        out.push({ kind: 'f2t', suit: SUIT_ORDER[s], to: j });
-            }
+        // 早先只在「还有暗牌没翻开」时生成，因为全明后 f2t 只是原地打转、会产生组合爆炸。
+        // 但那个剪枝让求解器与引擎的走法集合不一致（引擎总是允许 f2t），
+        // 全明局面也可能真需要把牌拉回来重排。现在总是生成，靠下面两点控规模：
+        //   1) 转移表（keyOf 含完整牌面）把重复局面直接剪掉
+        //   2) 只考虑「拉回来能压到列顶」的牌（canPlace 已经保证）
+        // 若真出现爆炸，nodeLimit / timeLimit 会返回 unknown 而不是乱猜。
+        for (let s = 0; s < 4; s++) {
+            if (st.found[s] === 0)
+                continue;
+            const card = cardIndex(SUIT_ORDER[s], st.found[s]);
+            for (let j = 0; j < 7; j++)
+                if (canPlace(st, card, j))
+                    out.push({ kind: 'f2t', suit: SUIT_ORDER[s], to: j });
         }
         if (st.stock.length > 0 || st.waste.length > 0)
             out.push({ kind: 'draw' });
         return out;
     }
-    /** 有没有「能推进局面」的走法：翻牌算（能出新牌），单纯回收不算 */
+    /** 还有没有「结构上能推进局面」的走法：翻牌算（牌库还有牌），单纯回收不算 */
     function hasAnyMove(st, pass) {
         for (const m of moves(st, pass)) {
             if (m.kind === 'draw') {
@@ -127,6 +128,18 @@
             return true;
         }
         return false;
+    }
+    /** 回收后能不能翻出一张「真的能走」的牌。
+        draw-1：回收后首张是废牌堆底（之前埋在下面），要单独检查它能不能动；
+        draw-3：分组固定、重翻顺序与上轮相同，回收永远只是原地打转。
+        注意：引擎的 draw() 回收时只回收不翻牌，所以这里要模拟「回收 + 再翻一次」。 */
+    function recycleUnlocks(st, pass) {
+        if (pass !== 1 || st.waste.length <= 1)
+            return false;
+        const afterRecycle = applyMove(st, { kind: 'draw' }, pass); // 此时 stock 已有牌、waste 为空
+        const afterDraw = applyMove(afterRecycle, { kind: 'draw' }, pass);
+        const first = afterDraw.waste[afterDraw.waste.length - 1];
+        return first !== undefined && canGoAnywhere(afterDraw, first);
     }
     function cloneState(st) {
         return {
@@ -222,6 +235,49 @@
             }
         };
         return list.slice().sort((a, b) => score(b) - score(a));
+    }
+    /** 把一条走法翻译成人话（UI 展示「第一步该怎么走」用） */
+    function describeMove(st, mv) {
+        const wasteTop = () => st.waste[st.waste.length - 1];
+        switch (mv.kind) {
+            case 'draw':
+                return st.stock.length ? '翻开牌库' : '回收废牌堆重新翻牌';
+            case 'w2f':
+                return '把废牌堆的 ' + cardText(wasteTop()) + ' 送进收牌区';
+            case 'w2t':
+                return '把废牌堆的 ' + cardText(wasteTop()) + ' 移到第 ' + (mv.to + 1) + ' 列';
+            case 't2f':
+                return '把第 ' + (mv.from + 1) + ' 列顶部的 ' + cardText(st.tab[mv.from][st.tab[mv.from].length - 1]) + ' 送进收牌区';
+            case 't2t': {
+                const head = st.tab[mv.from][st.tab[mv.from].length - mv.count];
+                return mv.count > 1
+                    ? '把第 ' + (mv.from + 1) + ' 列的 ' + cardText(head) + ' 连同下面 ' + (mv.count - 1) + ' 张移到第 ' + (mv.to + 1) + ' 列'
+                    : '把第 ' + (mv.from + 1) + ' 列的 ' + cardText(head) + ' 移到第 ' + (mv.to + 1) + ' 列';
+            }
+            case 'f2t':
+                return '把收牌区的 ' + cardText(cardIndex(mv.suit, st.found[SUIT_ORDER.indexOf(mv.suit)])) + ' 拉回第 ' + (mv.to + 1) + ' 列';
+        }
+    }
+    /** 从已填好转移表的搜索中回溯出一条必胜路线。
+        只有 dfs 判定为 win 后才会调用；memo 里已存有每个后继的结论，回溯本身几乎不花时间。 */
+    function extractLine(st, ctx) {
+        const line = [];
+        let cur = st;
+        for (let guard = 0; guard < 300 && !isWin(cur); guard++) {
+            let picked = null;
+            for (const m of orderMoves(moves(cur, ctx.pass), cur)) {
+                const next = applyMove(cur, m, ctx.pass);
+                if (isWin(next) || ctx.memo.get(keyOf(next)) === 'win') {
+                    picked = m;
+                    break;
+                }
+            }
+            if (!picked)
+                return line.length ? line : null;
+            line.push(picked);
+            cur = applyMove(cur, picked, ctx.pass);
+        }
+        return isWin(cur) ? line : null;
     }
     function dfs(st, depth, ctx) {
         if (isWin(st))
@@ -404,7 +460,10 @@
             verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line,
         });
         if (opts.quick) {
-            const alive = hasAnyMove(st, pass);
+            // quick 只回答「现在真的还有能推进局面的走法吗」。
+            // 注意：只看 hasAnyMove 不够——draw-1 下回收废牌堆会翻出埋在堆底的新牌，
+            // 但翻出来也可能无处可去，所以要真的检查那张牌能不能动。
+            const alive = hasAnyMove(st, pass) || recycleUnlocks(st, pass);
             return report(alive ? 'unknown' : 'dead', 0, alive
                 ? ['还有合法走法，暂时没被将死。']
                 : diagnose(st, pass));
@@ -423,7 +482,10 @@
             : verdict === 'win'
                 ? ['这局还有解，按提示走就能赢。']
                 : ['局面太复杂，在限定时间内没搜出结论（不代表赢不了，也不代表一定输）。'];
-        return report(verdict, ctx.nodes, reasons);
+        const line = verdict === 'win' ? extractLine(st, ctx) : undefined;
+        if (line && line.length)
+            reasons.push('必胜第一步：' + describeMove(st, line[0]));
+        return report(verdict, ctx.nodes, reasons, line ?? undefined);
     }
     return {
         analyze,
@@ -433,6 +495,7 @@
         moves,
         applyMove,
         canPlace,
+        describeMove,
         cardIndex,
         suitOf,
         rankOf,

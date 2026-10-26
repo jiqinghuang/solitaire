@@ -496,5 +496,84 @@ section('16 死局原因诊断', () => {
     ok(reasons.some((r) => r.includes('红桃J') || r.includes('方块J')), '说清楚了它在等哪张牌');
     ok(reasons.some((r) => r.includes('还需要 黑桃9') || r.includes('还需要 红桃9')), '说清楚了收牌卡在第几步');
 });
+section('17 quick 死局判定不能冤枉活局（回归：draw-1 回收会翻出新牌）', () => {
+    // 牌阵 [♥3]；废牌堆（底→顶）[♣2, ♠Q, ♥Q, ♠Q]，顶牌 ♠Q 无处可去。
+    // 旧版 hasAnyMove 把「回收」一律当原地打转 → 误报 dead；
+    // 但 draw-1 回收后整叠掉头，第一张翻出的是 ♣2，可以压到 ♥3 上。
+    const live = EngineCtor.planted({
+        waste: [['C', 2], ['S', 12], ['H', 12], ['S', 12]],
+        tableau: [[['H', 3]]],
+    }, () => 0, 1);
+    ok(V.analyze(V.fromEngine(live), 1, { quick: true }).verdict !== 'dead', 'draw-1 下回收能翻出新牌时，quick 不得判死局（回归）');
+    // 同样的牌局在 draw-3 下回收分组不变，重翻顺序与上轮相同 → 确实是死局
+    const dead3 = EngineCtor.planted({
+        waste: [['C', 2], ['S', 12], ['H', 12], ['S', 12]],
+        tableau: [[['H', 3]]],
+    }, () => 0, 3);
+    ok(V.analyze(V.fromEngine(dead3), 3, { quick: true }).verdict === 'dead', 'draw-3 下回收只是原地打转，仍判死局');
+    // 废牌堆只有一张时，回收后顶牌还是它自己 → 也是死局
+    const single = EngineCtor.planted({ waste: [['S', 12]], tableau: [[['H', 3]]] }, () => 0, 1);
+    ok(V.analyze(V.fromEngine(single), 1, { quick: true }).verdict === 'dead', 'draw-1 但废牌堆只剩一张时，回收后顶牌不变 → 死局');
+    // 回收后首张虽然变了，但仍无处可去 → 依然是死局（不能反向误报活）
+    // 废牌堆（底→顶）[♣5, ♠Q, ♥Q]，回收后首张是 ♣5，压不上 ♥3，也没别的去处
+    const stuck = EngineCtor.planted({
+        waste: [['C', 5], ['S', 12], ['H', 12]],
+        tableau: [[['H', 3]]],
+    }, () => 0, 1);
+    ok(V.analyze(V.fromEngine(stuck), 1, { quick: true }).verdict === 'dead', '回收后新顶牌也无处可去时仍判死局');
+    // 引擎的 peekDraw 视图与实际 draw() 必须一致（draw 回收时只回收不翻牌）
+    const pk = EngineCtor.planted({
+        waste: [['C', 2], ['S', 12], ['H', 12], ['S', 12]],
+        tableau: [[['H', 3]]],
+    }, () => 0, 1);
+    const peek = pk.peekDraw();
+    ok(peek.recycled === true && peek.recycleTop?.suit === 'C' && peek.recycleTop?.rank === 2, 'peekDraw 预测回收后首张是废牌堆底 ♣2');
+    const rec = pk.draw();
+    ok(rec.recycled === true && rec.drawn === 0, 'draw 回收时只回收、不順便翻牌');
+    pk.draw(); // 回收后的第一次真翻牌
+    const drawnTop = pk.topCard(WASTE);
+    ok(drawnTop?.suit === peek.recycleTop?.suit && drawnTop?.rank === peek.recycleTop?.rank, 'peekDraw 的预测与回收后第一次 draw() 翻出的牌一致');
+});
+section('18 求解器 f2t 与引擎一致（回归：全明局面不得剪枝）', () => {
+    // 全明局面：牌阵 [♥K] [♠K]，收牌区 ♠A..♠Q。
+    // 引擎允许把收牌区顶牌 ♠Q 拉回压到 ♥K 上；旧版求解器在全明时剪掉了 f2t → 走法集合不一致。
+    const e = EngineCtor.planted({
+        foundations: { S: Array.from({ length: 12 }, (_, i) => ['S', i + 1]) },
+        tableau: [[['H', 13]], [['S', 13]]],
+    });
+    ok(e.canMove(FOUND('S'), 1, COL(0)) === true, '前提：引擎允许 ♠Q 拉回压 ♥K');
+    const kinds = V.moves(V.fromEngine(e), 1).map((m) => m.kind);
+    ok(kinds.includes('f2t'), '全明局面求解器也生成 f2t（回归：以前被 hasHidden 剪掉）');
+    // 全明局面下的一步可胜仍然要能判出来，且不能被 f2t 拉成 unknown
+    const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);
+    const win = EngineCtor.planted({
+        foundations: { S: F('S', 12), H: F('H', 13), D: F('D', 13), C: F('C', 13) },
+        tableau: [[['S', 13]], [], [], [], [], [], []],
+    });
+    const rep = V.analyze(V.fromEngine(win), 1, {});
+    ok(rep.verdict === 'win', '加入 f2t 后一步可胜仍判为 win');
+    ok(rep.nodes < 400, '搜索规模没有爆炸（nodes=' + rep.nodes + '）');
+});
+section('19 winningLine 必须真的给出一条能赢的路线', () => {
+    const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);
+    const win = EngineCtor.planted({
+        foundations: { S: F('S', 12), H: F('H', 13), D: F('D', 13), C: F('C', 13) },
+        tableau: [[['S', 13]], [], [], [], [], [], []],
+    });
+    const st = V.fromEngine(win);
+    const rep = V.analyze(st, 1, {});
+    ok(rep.verdict === 'win', '前提：判为可胜');
+    ok(Array.isArray(rep.winningLine) && rep.winningLine.length > 0, 'win 时给出 winningLine（回归：以前永远是 undefined）');
+    ok(rep.reasons.some((r) => r.includes('必胜第一步')), '原因里带上了第一步的说明');
+    // 把 winningLine 逐步应用到状态上，必须真的能走到 52 张收完
+    let cur = st;
+    let steps = 0;
+    for (const mv of rep.winningLine ?? []) {
+        cur = V.applyMove(cur, mv, 1);
+        steps++;
+    }
+    const total = cur.found.reduce((a, b) => a + b, 0);
+    ok(total === 52, '按 winningLine 走到底确实收满 52 张（走了 ' + steps + ' 步）');
+});
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

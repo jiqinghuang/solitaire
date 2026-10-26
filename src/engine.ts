@@ -10,7 +10,7 @@
    - 牌库支持「每次翻 1 张 / 3 张」；翻完可由废牌堆整体回收（保持物理翻堆顺序）
    - 任一列移走牌后自动翻开新顶牌
    - 收牌区集齐 52 张即胜利；计时从第一次操作开始、胜利冻结
-   - 撤销保存完整快照（含自动翻牌与胜负状态），不限步数但限制内存（最近 200 步） */
+   - 撤销记录「反向操作」（含自动翻牌与胜负状态），不限步数但限制内存（最近 200 步） */
 
 /* ---- 领域类型（脚本式全局作用域，ui.ts / test.ts / uitest.ts 共用） ---- */
 type Suit = 'S' | 'H' | 'D' | 'C';
@@ -26,6 +26,17 @@ type PileRef =
   | { kind: 'tableau'; index: number };
 
 interface DrawResult { drawn: number; recycled: boolean }
+
+/** 下一次 draw() 会发生什么（不改变状态）。
+    quick 死局判定靠它区分「翻牌真的推进局面」与「只是原地打转」。 */
+interface DrawPeek {
+  /** 下一次 draw() 会翻出的牌数（回收时按回收后的牌库算） */
+  count: number;
+  /** 下一次 draw() 是否会触发回收 */
+  recycled: boolean;
+  /** 回收后下一张会翻出的牌（不回收时为 null） */
+  recycleTop: Card | null;
+}
 interface MoveResult { ok: boolean; reason: string }
 
 interface Hint { from: PileRef; count: number; to: PileRef; text: string }
@@ -49,6 +60,8 @@ interface SolitaireInstance {
   move(from: PileRef, count: number, to: PileRef): MoveResult;
   /** 从牌库翻牌；牌库空时回收废牌堆。drawn=0 且 recycled=false 表示彻底没牌可翻 */
   draw(): DrawResult;
+  /** 预览下一次 draw() 的结果，不改变状态 */
+  peekDraw(): DrawPeek;
   /** 双击：把单张顶牌送进收牌区；成功返回花色 */
   autoMove(from: PileRef): Suit | null;
   /** 撤销上一步；无历史返回 false */
@@ -137,15 +150,30 @@ type CardSpec = [Suit, number, boolean?];
     return deck;
   }
 
-  interface Snapshot {
-    stock: Card[]; waste: Card[];
-    foundations: Record<Suit, Card[]>;
-    tableau: Card[][];
+  /** 撤销记录里需要回滚的「元状态」：步数、胜负、计时起止点 */
+  interface UndoMeta {
     moves: number; phase: Phase;
     startedAt: number | null; endedAt: number | null;
   }
 
+  /** 撤销记录：只存「反向操作」需要的最小信息。
+      早期版本每步克隆整盘 52 张牌（200 步 ≈ 一万个对象）；
+      这里每条只有几十字节，回滚靠把牌搬回去 + 复原元状态。 */
+  type UndoRecord =
+    | (UndoMeta & { kind: 'move'; from: PileRef; to: PileRef; count: number; flipped: boolean; faces: boolean[] })
+    | (UndoMeta & { kind: 'draw'; drawn: number })
+    | (UndoMeta & { kind: 'recycle' });
+
   const cloneCard = (c: Card): Card => ({ suit: c.suit, rank: c.rank, faceUp: c.faceUp });
+
+  /** PileRef 由调用方持有，存进撤销记录前先复制，避免外部改对象污染历史 */
+  function copyLoc(loc: PileRef): PileRef {
+    switch (loc.kind) {
+      case 'foundation': return { kind: 'foundation', suit: loc.suit };
+      case 'tableau': return { kind: 'tableau', index: loc.index };
+      default: return { kind: loc.kind };
+    }
+  }
 
   class SolitaireImpl implements SolitaireInstance {
     private rand: () => number;
@@ -155,7 +183,7 @@ type CardSpec = [Suit, number, boolean?];
     private waste: Card[] = [];
     private foundations: Record<Suit, Card[]> = { S: [], H: [], D: [], C: [] };
     private tableau: Card[][] = [];
-    private history: Snapshot[] = [];
+    private history: UndoRecord[] = [];
     private _moves = 0;
     private _phase: Phase = 'playing';
     private _startedAt: number | null = null;
@@ -296,22 +324,13 @@ type CardSpec = [Suit, number, boolean?];
       if (this._startedAt === null) this._startedAt = this.clock();
     }
 
-    private snapshot(): Snapshot {
-      return {
-        stock: this.stock.map(cloneCard),
-        waste: this.waste.map(cloneCard),
-        foundations: {
-          S: this.foundations.S.map(cloneCard), H: this.foundations.H.map(cloneCard),
-          D: this.foundations.D.map(cloneCard), C: this.foundations.C.map(cloneCard),
-        },
-        tableau: this.tableau.map((p) => p.map(cloneCard)),
-        moves: this._moves, phase: this._phase,
-        startedAt: this._startedAt, endedAt: this._endedAt,
-      };
+    /** 变更前抓一份元状态，撤销时原样回滚 */
+    private meta(): UndoMeta {
+      return { moves: this._moves, phase: this._phase, startedAt: this._startedAt, endedAt: this._endedAt };
     }
 
-    private pushHistory(): void {
-      this.history.push(this.snapshot());
+    private remember(rec: UndoRecord): void {
+      this.history.push(rec);
       if (this.history.length > UNDO_LIMIT) this.history.shift();
     }
 
@@ -332,18 +351,21 @@ type CardSpec = [Suit, number, boolean?];
         if (from.kind === 'stock') return { ok: false, reason: '牌库的牌需要先翻开' };
         return { ok: false, reason: '这两叠牌不能这样叠放' };
       }
-      this.pushHistory();
+      const meta = this.meta();          // 必须在 touch() 之前抓，撤销才能把计时起点也退回去
       this.touch();
       const src = this.pile(from);
       const moving = src.splice(src.length - count, count);
+      const faces = moving.map((c) => c.faceUp);   // 撤销时要原样恢复朝向
+      let flipped = false;
       if (from.kind === 'tableau') {
         const left = this.tableau[from.index];
-        if (left.length && !left[left.length - 1].faceUp) left[left.length - 1].faceUp = true;
+        if (left.length && !left[left.length - 1].faceUp) { left[left.length - 1].faceUp = true; flipped = true; }
       }
       const dst = this.pile(to);
       for (const c of moving) { c.faceUp = true; dst.push(c); }
       this._moves++;
       this.checkWin();
+      this.remember({ kind: 'move', from: copyLoc(from), to: copyLoc(to), count, flipped, faces, ...meta });
       return { ok: true, reason: '' };
     }
 
@@ -351,15 +373,16 @@ type CardSpec = [Suit, number, boolean?];
       if (this._phase === 'won') return { drawn: 0, recycled: false };
       if (this.stock.length === 0) {
         if (this.waste.length === 0) return { drawn: 0, recycled: false };
-        this.pushHistory();
+        const meta = this.meta();
         this.touch();
         // 物理翻堆：整叠掉头后扣回牌库，原废牌堆顶变成新牌库底
         this.stock = this.waste.slice().reverse().map((c) => ({ suit: c.suit, rank: c.rank, faceUp: false }));
         this.waste = [];
         this._moves++;
+        this.remember({ kind: 'recycle', ...meta });
         return { drawn: 0, recycled: true };
       }
-      this.pushHistory();
+      const meta = this.meta();
       this.touch();
       let drawn = 0;
       for (let i = 0; i < this._passCount && this.stock.length; i++) {
@@ -369,7 +392,22 @@ type CardSpec = [Suit, number, boolean?];
         drawn++;
       }
       this._moves++;
+      this.remember({ kind: 'draw', drawn, ...meta });
       return { drawn, recycled: false };
+    }
+
+    /** 下一次 draw() 的纯预览：回收会整叠掉头，所以「回收后第一张」是废牌堆底 */
+    peekDraw(): DrawPeek {
+      if (this.stock.length === 0) {
+        if (this.waste.length === 0) return { count: 0, recycled: false, recycleTop: null };
+        const first = this.waste[0];   // 回收后它变成新牌库顶，也是回收后第一张被翻出的牌
+        return {
+          count: Math.min(this._passCount, this.waste.length),
+          recycled: true,
+          recycleTop: first ? cloneCard(first) : null,
+        };
+      }
+      return { count: Math.min(this._passCount, this.stock.length), recycled: false, recycleTop: null };
     }
 
     autoMove(from: PileRef): Suit | null {
@@ -383,16 +421,38 @@ type CardSpec = [Suit, number, boolean?];
     }
 
     undo(): boolean {
-      const snap = this.history.pop();
-      if (!snap) return false;
-      this.stock = snap.stock;
-      this.waste = snap.waste;
-      this.foundations = snap.foundations;
-      this.tableau = snap.tableau;
-      this._moves = snap.moves;
-      this._phase = snap.phase;
-      this._startedAt = snap.startedAt;
-      this._endedAt = snap.endedAt;
+      const rec = this.history.pop();
+      if (!rec) return false;
+      if (rec.kind === 'move') {
+        // 把牌从目标搬回源位置（牌对象本身不变，身份与顺序都能精确复原）
+        const dst = this.pile(rec.to);
+        const moving = dst.splice(dst.length - rec.count, rec.count);
+        const src = this.pile(rec.from);
+        for (let i = 0; i < moving.length; i++) {
+          moving[i].faceUp = rec.faces[i] ?? true;   // 恢复移动前的朝向
+          src.push(moving[i]);
+        }
+        // 自动翻开的那张牌要重新盖回（必须在 push 之前定位，否则会误伤刚搬回来的牌）
+        if (rec.flipped && rec.from.kind === 'tableau') {
+          const left = this.tableau[rec.from.index];
+          const idx = left.length - rec.count - 1;
+          if (idx >= 0) left[idx].faceUp = false;
+        }
+      } else if (rec.kind === 'draw') {
+        for (let i = 0; i < rec.drawn; i++) {
+          const c = this.waste.pop() as Card;
+          c.faceUp = false;
+          this.stock.push(c);
+        }
+      } else {
+        // 回收的反向：牌库（= 掉头后的废牌堆）整叠翻回废牌堆
+        const back = this.stock.splice(0).reverse();
+        for (const c of back) { c.faceUp = true; this.waste.push(c); }
+      }
+      this._moves = rec.moves;
+      this._phase = rec.phase;
+      this._startedAt = rec.startedAt;
+      this._endedAt = rec.endedAt;
       return true;
     }
 
