@@ -1,0 +1,14 @@
+{
+  "name": "solitaire",
+  "version": "1.0.0",
+  "private": true,
+  "description": "经典 Win95 纸牌接龙（Klondike）复刻：TS 源码（src/）+ tsc 编译产物（dist/），运行时零依赖",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node dist/test.js && node dist/uitest.js"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
