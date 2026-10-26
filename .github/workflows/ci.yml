@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: node dist/test.js
+      - run: node dist/uitest.js
+      # dist 是随仓库提交的编译产物（线上加载的就是它）：
+      # 重新编译后 diff 必须为空，防止改了 src 忘记 build 就提交。
+      - name: dist 与 src 同步校验
+        run: |
+          git add -A dist
+          git diff --cached --ignore-cr-at-eol --exit-code
