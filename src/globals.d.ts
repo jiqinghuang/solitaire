@@ -11,3 +11,6 @@ declare var module: { exports: any };
 
 /** 浏览器端由 dist/engine.js 挂载到全局；src/ui.ts 据此获得运行时入口 */
 declare var Solitaire: SolitaireAPI;
+
+/** 浏览器端由 dist/solver.js 挂载到全局；src/ui.ts 据此获得求解器 */
+declare var SolitaireSolver: any;

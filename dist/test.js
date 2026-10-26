@@ -4,6 +4,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
    测试直接 require 同目录的 dist/engine.js 产物——测的就是浏览器实际加载的那份代码。
    随机发牌全部用种子 PRNG，牌局可复现；规则边界用 planted() 显式构造。 */
 const SOL = require('./engine.js');
+const V = require('./solver.js');
 const EngineCtor = SOL.Solitaire;
 const SUITS = SOL.SUITS;
 const isRed = SOL.isRed;
@@ -343,6 +344,157 @@ section('12 工具函数', () => {
     ok(rankLabel(1) === 'A' && rankLabel(11) === 'J' && rankLabel(13) === 'K' && rankLabel(10) === '10', '点数标签');
     ok(SOL.suitLabel('S') === '黑桃' && SOL.suitLabel('D') === '方块', '花色标签');
     ok(SOL.sameLocation(COL(1), COL(1)) && !SOL.sameLocation(COL(1), COL(2)), '位置比较');
+});
+/* ---------- 求解器 ---------- */
+/** 把走法列表规范成可比较的字符串集合 */
+function mvKey(m) {
+    switch (m.kind) {
+        case 'draw': return 'draw';
+        case 'w2f': return 'w2f';
+        case 'w2t': return 'w2t:' + m.to;
+        case 't2f': return 't2f:' + m.from;
+        case 't2t': return 't2t:' + m.from + ':' + m.count + ':' + m.to;
+        case 'f2t': return 'f2t:' + m.suit + ':' + m.to;
+        default: return '?';
+    }
+}
+section('13 canAutoFinish 真的能收完才算数', () => {
+    // 回归：以前只看「空库 + 全明」，导致真死局里按钮也亮着
+    const dead = EngineCtor.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] });
+    ok(dead.allFaceUp() && dead.stockCount === 0 && dead.wasteCount === 0, '前提：全明且牌库空（旧版会误判为可自动完成）');
+    ok(dead.canAutoFinish() === false, '真死局时 canAutoFinish 返回 false（回归）');
+    ok(dead.autoFinishStep() === false, '同时 autoFinishStep 也确实走不动');
+    const ready = EngineCtor.planted({
+        tableau: [[['S', 13]], [['H', 13]]],
+        foundations: {
+            S: Array.from({ length: 12 }, (_, i) => ['S', i + 1]),
+            H: Array.from({ length: 12 }, (_, i) => ['H', i + 1]),
+            D: Array.from({ length: 13 }, (_, i) => ['D', i + 1]),
+            C: Array.from({ length: 13 }, (_, i) => ['C', i + 1]),
+        },
+    });
+    ok(ready.canAutoFinish() === true, '真的收得完时才返回 true');
+});
+section('14 求解器与引擎的走法生成必须一致（对拍）', () => {
+    let mismatch = 0, checked = 0;
+    for (let seed = 1; seed <= 60; seed++) {
+        const e = new EngineCtor(lcg(seed), () => 0, (seed % 2 ? 1 : 3));
+        for (let step = 0; step < 12; step++) {
+            const st = V.fromEngine(e);
+            const solverSet = new Set(V.moves(st, e.passCount).map(mvKey));
+            // 引擎侧枚举全部候选走法，逐一比对
+            const expect = new Set();
+            const w = { kind: 'waste' };
+            for (const s of SUITS) {
+                if (e.canMove(w, 1, { kind: 'foundation', suit: s }))
+                    expect.add('w2f');
+                for (let j = 0; j < 7; j++) {
+                    if (e.canMove(w, 1, COL(j)))
+                        expect.add('w2t:' + j);
+                    if (e.canMove(FOUND(s), 1, COL(j)))
+                        expect.add('f2t:' + s + ':' + j);
+                }
+            }
+            for (let i = 0; i < 7; i++) {
+                const n = e.tableauCount(i);
+                for (const s of SUITS)
+                    if (e.canMove(COL(i), 1, FOUND(s)))
+                        expect.add('t2f:' + i);
+                for (let cnt = 1; cnt <= n; cnt++) {
+                    for (let j = 0; j < 7; j++) {
+                        if (j === i)
+                            continue;
+                        if (e.canMove(COL(i), cnt, COL(j)))
+                            expect.add('t2t:' + i + ':' + cnt + ':' + j);
+                    }
+                }
+            }
+            if (e.stockCount > 0 || e.wasteCount > 0)
+                expect.add('draw');
+            checked++;
+            if (expect.size !== solverSet.size || [...expect].some((k) => !solverSet.has(k))
+                || [...solverSet].some((k) => !expect.has(k))) {
+                mismatch++;
+                if (mismatch <= 2) {
+                    console.log('    差异 seed=' + seed + ' step=' + step);
+                    console.log('      引擎:' + [...expect].sort().join(' '));
+                    console.log('      求解器:' + [...solverSet].sort().join(' '));
+                }
+            }
+            // 推进一步，继续对拍
+            const all = V.moves(st, e.passCount);
+            const pick = all[Math.floor(lcg(seed * 100 + step)() * all.length)];
+            if (pick) {
+                if (pick.kind === 'draw')
+                    e.draw();
+                else if (pick.kind === 'w2f')
+                    e.move({ kind: 'waste' }, 1, FOUND('S'));
+                else if (pick.kind === 'w2t')
+                    e.move({ kind: 'waste' }, 1, COL(pick.to));
+                else if (pick.kind === 't2f')
+                    e.move(COL(pick.from), 1, FOUND(e.cardsAt(COL(pick.from)).slice(-1)[0].suit));
+                else if (pick.kind === 't2t')
+                    e.move(COL(pick.from), pick.count, COL(pick.to));
+                else if (pick.kind === 'f2t')
+                    e.move(FOUND(pick.suit), 1, COL(pick.to));
+            }
+        }
+    }
+    ok(checked > 0, '跑完了 ' + checked + ' 个状态的对拍');
+    ok(mismatch === 0, '求解器与引擎的合法走法完全一致（0 处差异）');
+});
+section('15 求解器判定', () => {
+    const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);
+    // 一步可胜
+    const win = EngineCtor.planted({
+        foundations: { S: F('S', 12), H: F('H', 13), D: F('D', 13), C: F('C', 13) },
+        tableau: [[['S', 13]], [], [], [], [], [], []],
+    });
+    const w = V.analyze(V.fromEngine(win), 1, {});
+    ok(w.verdict === 'win', '一步可胜的局面判为 win');
+    ok(w.nodes < 200, '找到胜利不需要大规模搜索（nodes=' + w.nodes + '）');
+    // 52 张齐全的真死局：关键牌埋在暗牌下
+    const dead = EngineCtor.planted({
+        foundations: { S: F('S', 8), H: F('H', 8), D: F('D', 8), C: F('C', 8) },
+        tableau: [
+            [['S', 9, false], ['H', 13, false], ['C', 12, false], ['D', 11, false], ['S', 10, true]],
+            [['H', 9, false], ['S', 13, false], ['D', 12, false], ['C', 11, false], ['H', 10, true]],
+            [['D', 9, false], ['C', 13, false], ['S', 12, false], ['H', 11, false], ['D', 10, true]],
+            [['C', 9, false], ['D', 13, false], ['H', 12, false], ['S', 11, false], ['C', 10, true]],
+        ],
+    });
+    const st = V.fromEngine(dead);
+    const total = st.found.reduce((a, b) => a + b, 0) + st.tab.reduce((a, c) => a + c.length, 0);
+    ok(total === 52, '死局测试用的是完整 52 张牌');
+    const d = V.analyze(st, 1, {});
+    ok(d.verdict === 'dead', '真死局判为 dead');
+    ok(d.reasons.length > 0 && d.reasons.length <= 6, '给出的原因条数合理（' + d.reasons.length + ' 条）');
+    ok(d.reasons.some((r) => r.includes('无处可去')), '原因里点名了卡住的牌');
+    ok(d.reasons.some((r) => r.includes('收牌停在')), '原因里指出了收牌卡在哪一步');
+    // quick 模式：没得走就是 dead
+    ok(V.analyze(st, 1, { quick: true }).verdict === 'dead', 'quick 模式也能识别无路可走');
+    // 不谎报：有得走但搜不出结论时返回 unknown
+    const mid = new EngineCtor(lcg(42), () => 0, 1);
+    const mm = V.analyze(V.fromEngine(mid), 1, { nodeLimit: 200, timeLimit: 20 });
+    ok(['win', 'dead', 'unknown'].includes(mm.verdict), '中局返回三态之一（实际=' + mm.verdict + '）');
+});
+section('16 死局原因诊断', () => {
+    const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);
+    const dead = EngineCtor.planted({
+        foundations: { S: F('S', 8), H: F('H', 8), D: F('D', 8), C: F('C', 8) },
+        tableau: [
+            [['S', 9, false], ['H', 13, false], ['C', 12, false], ['D', 11, false], ['S', 10, true]],
+            [['H', 9, false], ['S', 13, false], ['D', 12, false], ['C', 11, false], ['H', 10, true]],
+            [['D', 9, false], ['C', 13, false], ['S', 12, false], ['H', 11, false], ['D', 10, true]],
+            [['C', 9, false], ['D', 13, false], ['H', 12, false], ['S', 11, false], ['C', 10, true]],
+        ],
+    });
+    const reasons = V.diagnose(V.fromEngine(dead), 1);
+    ok(reasons.length > 0, 'diagnose 返回非空原因');
+    ok(reasons.every((r) => typeof r === 'string' && r.length > 4), '每条原因都是可读的中文句子');
+    ok(reasons.some((r) => r.includes('黑桃10')), '点名了被卡住的黑桃10');
+    ok(reasons.some((r) => r.includes('红桃J') || r.includes('方块J')), '说清楚了它在等哪张牌');
+    ok(reasons.some((r) => r.includes('还需要 黑桃9') || r.includes('还需要 红桃9')), '说清楚了收牌卡在第几步');
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

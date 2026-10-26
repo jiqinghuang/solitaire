@@ -160,7 +160,7 @@ const helpDrop = byId('menuHelpDrop'); helpDrop.className = 'dropdown'; helpDrop
 menuHelp.appendChild(helpTitle); menuHelp.appendChild(helpDrop);
 
 const miEls: Record<string, StubEl> = {};
-for (const act of ['new', 'restart', 'draw1', 'draw3', 'undo', 'hint', 'autofinish', 'rules', 'about']) {
+for (const act of ['new', 'restart', 'draw1', 'draw3', 'undo', 'hint', 'autofinish', 'analyze', 'rules', 'about']) {
   const mi = mkEl('div'); mi.className = 'mi'; mi.dataset.act = act;
   const chk = mkEl('span'); chk.className = 'chk';
   mi.appendChild(chk);
@@ -222,6 +222,7 @@ const globalAny: any = globalThis as any;
 globalAny.document = documentStub;
 globalAny.window = windowStub;
 globalAny.Solitaire = SOL;
+globalAny.SolitaireSolver = require('./solver.js');
 globalAny.self = globalAny;
 globalAny.getComputedStyle = () => ({
   getPropertyValue: (name: string): string => {
@@ -529,6 +530,64 @@ section('U15 自动完成异步任务与列高边界', () => {
   const m = U.metrics();
   ok(Math.abs(singleHeight - m.h) < 0.01 && Math.abs(twoHeight - (m.h + m.fan)) < 0.01,
     '列高只包含最后一张牌自身，不多算一个牌间距');
+});
+
+section('U16 死局自动检测与原因面板', () => {
+  const dead = SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] });
+  U.setEngine(dead);
+  U.clearPanel();
+  U.checkDeath();
+  const panels = tableEl.querySelectorAll('.info-banner');
+  ok(panels.length === 1, '死局时弹出结论面板');
+  const h = panels[0].querySelector('h3');
+  ok(!!h && h.textContent.includes('无法继续'), '标题告诉玩家已无法继续（实际：' + (h ? h.textContent : '') + '）');
+  const items = panels[0].querySelectorAll('li');
+  ok(items.length > 0, '面板列出死局原因（' + items.length + ' 条）');
+  ok(items.some((li: any) => li.textContent.includes('无处可去') || li.textContent.includes('翻不开') || li.textContent.includes('没有')),
+    '原因里点名了卡点');
+  const btns = panels[0].querySelectorAll('.btn');
+  ok(btns.length >= 2, '面板带操作按钮（' + btns.length + ' 个）');
+  ok(btns.some((b: any) => b.textContent.includes('撤销')), '其中有撤销按钮');
+  ok(btns.some((b: any) => b.textContent.includes('发牌')), '其中有重新发牌按钮');
+
+  // 还有得走时不能误报
+  const alive = SOL.Solitaire.planted({ foundations: { S: [['S', 1]] }, tableau: [[['S', 2]]] });
+  U.setEngine(alive);
+  U.clearPanel();
+  U.checkDeath();
+  ok(tableEl.querySelectorAll('.info-banner').length === 0, '还有得走时不弹死局面板（不误报）');
+});
+
+section('U17 「分析局面」给出结论与原因', () => {
+  U.setEngine(SOL.Solitaire.planted({
+    foundations: {
+      S: Array.from({ length: 12 }, (_, i) => ['S', i + 1] as any),
+      H: Array.from({ length: 13 }, (_, i) => ['H', i + 1] as any),
+      D: Array.from({ length: 13 }, (_, i) => ['D', i + 1] as any),
+      C: Array.from({ length: 13 }, (_, i) => ['C', i + 1] as any),
+    },
+    tableau: [[['S', 13]], [], [], [], [], [], []],
+  }));
+  U.clearPanel();
+  U.analyzeNow();
+  const panels = tableEl.querySelectorAll('.info-banner');
+  ok(panels.length === 1, '分析后弹出面板');
+  const h = panels[0].querySelector('h3');
+  ok(!!h && h.textContent.includes('还能赢'), '可胜局面判为「还能赢」（实际：' + (h ? h.textContent : '') + '）');
+  ok(panels[0].querySelectorAll('li').length > 0, '附带原因说明');
+  ok(panels[0].querySelectorAll('.btn').length >= 2, '带操作按钮');
+
+  // 死局的分析结果
+  U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
+  U.clearPanel();
+  U.analyzeNow();
+  const p2 = tableEl.querySelectorAll('.info-banner');
+  ok(p2.length === 1 && /死局/.test(p2[0].querySelector('h3')?.textContent ?? ''),
+    '死局局面判为「死局」（实际：' + (p2[0].querySelector('h3')?.textContent ?? '') + '）');
+
+  // 重开 / 撤销会清掉面板
+  U.restart();
+  ok(tableEl.querySelectorAll('.info-banner').length === 0, '重新发牌后面板消失');
 });
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

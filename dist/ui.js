@@ -10,6 +10,8 @@
    - 触屏走同一套 pointer 事件（pointerdown/move/up） */
 /* ---- 运行时入口（dist/engine.js 挂载的全局） ---- */
 const ENGINE = Solitaire.Solitaire;
+/** 求解器（dist/solver.js 挂载的全局）：死局判定与原因诊断 */
+const Solver = SolitaireSolver;
 const SUITS = Solitaire.SUITS;
 const isRed = Solitaire.isRed;
 const rankLabel = Solitaire.rankLabel;
@@ -338,6 +340,8 @@ function tryMove(src, dst) {
     checkAutoFinishPrompt();
     if (engine.phase === 'won')
         winSequence();
+    else
+        checkDeath();
     return true;
 }
 /** 元素 → 所属牌堆。
@@ -590,6 +594,8 @@ function autoCollect(loc) {
     checkAutoFinishPrompt();
     if (engine.phase === 'won')
         winSequence();
+    else
+        checkDeath();
     return true;
 }
 /* ---- 牌库 ---- */
@@ -690,6 +696,7 @@ function autoFinish() {
 /* ---- 新游戏 / 撤销 ---- */
 function newGame(pass, rand, clock) {
     stopAutoFinish();
+    clearPanel();
     if (pass !== undefined)
         passCount = pass;
     autoPromptShown = false;
@@ -706,6 +713,7 @@ function newGame(pass, rand, clock) {
 }
 function restart() {
     stopAutoFinish();
+    clearPanel();
     autoPromptShown = false;
     if (winTimer) {
         clearTimeout(winTimer);
@@ -720,6 +728,7 @@ function restart() {
 }
 function undo() {
     stopAutoFinish();
+    clearPanel();
     if (!engine.undo()) {
         toast('没有可撤销的操作', 1200);
         return;
@@ -902,7 +911,88 @@ function onMenuItem(act) {
         case 'about':
             showAbout();
             break;
+        case 'analyze':
+            analyzeNow();
+            break;
     }
+}
+/* ---- 死局检测与局面分析 ----
+   两层：
+   1. 每次走子后跑 quick 检查（只看还有没有得走），卡死就弹面板——这是玩家最常遇到的
+   2. 菜单「分析局面」跑真正的求解器，给出 可胜 / 死局 / 搜不出来 三态与原因 */
+function clearPanel() {
+    // 面板总是挂在牌桌下；从牌桌内查找比全局选择器更稳（也不依赖 stub 的 document.querySelectorAll）
+    for (const n of tableEl()?.querySelectorAll?.('.info-banner') ?? [])
+        n.remove?.();
+}
+/** 弹出结论面板：标题 + 副标题 + 原因清单 + 按钮 */
+function showPanel(title, subtitle, reasons, buttons) {
+    clearPanel();
+    const table = tableEl();
+    const panel = document.createElement('div');
+    panel.className = 'info-banner';
+    const h = document.createElement('h3');
+    h.textContent = title;
+    panel.appendChild(h);
+    const sub = document.createElement('p');
+    sub.className = 'sub';
+    sub.textContent = subtitle;
+    panel.appendChild(sub);
+    if (reasons.length) {
+        const ul = document.createElement('ul');
+        for (const r of reasons) {
+            const li = document.createElement('li');
+            li.textContent = r;
+            ul.appendChild(li);
+        }
+        panel.appendChild(ul);
+    }
+    const row = document.createElement('div');
+    row.className = 'btn-row';
+    for (const [label, fn] of buttons) {
+        const b = document.createElement('button');
+        b.className = 'btn';
+        b.textContent = label;
+        b.addEventListener('click', () => { clearPanel(); fn(); });
+        row.appendChild(b);
+    }
+    panel.appendChild(row);
+    table.appendChild(panel);
+}
+/** 走子后调用：真没得走了就直接告诉玩家，并说清楚为什么 */
+function checkDeath() {
+    if (engine.phase !== 'playing')
+        return;
+    const st = Solver.fromEngine(engine);
+    const rep = Solver.analyze(st, engine.passCount, { quick: true });
+    if (rep.verdict !== 'dead')
+        return;
+    showPanel('这局已经无法继续', '没有任何能推进局面的走法了。可以撤销几步试试，或者重新发牌。', rep.reasons, [
+        ['撤销一步', () => undo()],
+        ['重新发牌', () => restart()],
+        ['关闭', () => { }],
+    ]);
+}
+/** 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态 */
+function analyzeNow() {
+    if (engine.phase === 'won') {
+        toast('这局已经赢了。', 1500);
+        return;
+    }
+    toast('正在分析局面…', 900);
+    const st = Solver.fromEngine(engine);
+    const rep = Solver.analyze(st, engine.passCount, { nodeLimit: 60000, timeLimit: 700 });
+    const head = rep.verdict === 'win' ? '这局还能赢'
+        : rep.verdict === 'dead' ? '这局已经死局'
+            : '暂时无法确定';
+    const sub = rep.verdict === 'win' ? '按提示走就能收完，继续吧。'
+        : rep.verdict === 'dead' ? '无论怎么走都赢不了了。建议撤销几步，或重新发牌。'
+            : '牌局太复杂，在限定时间内没搜出结论；不代表赢不了，也不代表一定输。';
+    showPanel(head, sub + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms）', rep.reasons, [
+        ['提示', () => showHint()],
+        ['重新发牌', () => restart()],
+        ['关闭', () => { }],
+    ]);
 }
 function showRules() {
     const el = $('.rules');
@@ -982,7 +1072,7 @@ function bindEvents() {
             const inHelp = menuOpen.menu === $('#menuHelp');
             const map = inHelp
                 ? { r: 'rules', a: 'about', g: 'close', h: 'close' }
-                : { n: 'new', r: 'restart', u: 'undo', f: 'autofinish', '1': 'draw1', '3': 'draw3', h: 'hint', g: 'close' };
+                : { n: 'new', r: 'restart', u: 'undo', f: 'autofinish', a: 'analyze', '1': 'draw1', '3': 'draw3', h: 'hint', g: 'close' };
             const act = map[k];
             if (act === 'close') {
                 closeMenu();
@@ -1040,6 +1130,7 @@ init();
 /* 测试钩子：uitest 以最小 DOM stub 执行本文件后，借它驱动流程（生产环境无害） */
 globalThis.__sui = {
     newGame, restart, undo, doDraw, showHint, autoFinish,
+    analyzeNow, checkDeath, clearPanel, showPanel,
     setEngine(e) { engine = e; autoPromptShown = false; render(); },
     engine: () => engine,
     render,

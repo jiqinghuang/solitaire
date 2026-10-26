@@ -534,6 +534,63 @@ body {
 .win-banner p { font-size: 13px; margin-bottom: 13px; }
 .win-banner .btn { min-width: 104px; }
 
+/* ---- 结论面板（死局 / 局面分析） ---- */
+
+.info-banner {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  width: min(460px, 88%);
+  background: var(--face);
+  padding: 16px 20px 14px;
+  z-index: 70;
+  border-radius: 3px;
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
+              inset -2px -2px 0 var(--dark), inset 2px 2px 0 #dfdfdf,
+              6px 8px 28px rgba(0, 0, 0, .5);
+}
+.info-banner h3 {
+  font-size: 17px;
+  color: var(--navy);
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+}
+.info-banner .sub {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #303030;
+  margin-bottom: 8px;
+}
+.info-banner ul {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid var(--dark);
+  box-shadow: inset 1px 1px 0 var(--dark);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.info-banner li {
+  font-size: 12px;
+  line-height: 1.65;
+  color: #1c1c1c;
+  padding-left: 14px;
+  position: relative;
+}
+.info-banner li::before {
+  content: '\25AA';
+  position: absolute;
+  left: 0;
+  color: var(--suit-h, #c21030);
+}
+.info-banner .btn-row {
+  display: flex;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
 .bouncing { position: absolute; z-index: 65; pointer-events: none; }
 .bouncing .card { box-shadow: 0 3px 8px rgba(0, 0, 0, .38), 0 0 0 1px rgba(16, 22, 32, .32); }
 

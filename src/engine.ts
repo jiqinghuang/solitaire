@@ -453,8 +453,49 @@ type CardSpec = [Suit, number, boolean?];
 
     /* ---- 自动完成 ---- */
 
+    /** 能否自动完成：牌库与废牌堆清空、全明，**且真的能把剩下的牌逐张收完**。
+        早期版本只看表面条件（空库 + 全明），导致「真死局」里按钮也是亮的、
+        点下去却什么都发生不了。现在用与 autoFinishStep 同一套贪心试跑一遗。 */
     canAutoFinish(): boolean {
-      return this._phase === 'playing' && this.stock.length === 0 && this.waste.length === 0 && this.allFaceUp();
+      if (this._phase !== 'playing') return false;
+      if (this.stock.length !== 0 || this.waste.length !== 0 || !this.allFaceUp()) return false;
+      return this.sweepCompletes();
+    }
+
+    /** 在副本上试跑一遍贪心收牌，看能不能把剩下的牌逐张收完。
+        与 autoFinishStep 使用同一优先级（点数小的先送），保证：
+        canAutoFinish() 为 true ⟹ autoFinish 一定跑得完。
+        注意：收走顶牌后要露出列里的下一张，所以必须维护真实牌叠。 */
+    private sweepCompletes(): boolean {
+      const found: Record<Suit, number> = { S: 0, H: 0, D: 0, C: 0 };
+      for (const s of SUITS) found[s] = this.foundations[s].length;
+      const cols: Card[][] = this.tableau.map((p) => p.slice());
+      const waste: Card[] = this.waste.slice();
+      let remaining = SUITS.reduce((n, s) => n + (13 - found[s]), 0);
+      let guard = 0;
+      while (remaining > 0 && guard++ < 60) {
+        const opts: Array<{ card: Card; take: () => void }> = [];
+        for (let i = 0; i < 7; i++) {
+          const c = cols[i][cols[i].length - 1];
+          if (c) opts.push({ card: c, take: () => { cols[i].pop(); } });
+        }
+        const wt = waste[waste.length - 1];
+        if (wt) opts.push({ card: wt, take: () => { waste.pop(); } });
+        opts.sort((a, b) => a.card.rank - b.card.rank);
+        let moved = false;
+        for (const opt of opts) {
+          const s = opt.card.suit;
+          if (opt.card.rank === found[s] + 1) {
+            found[s]++;
+            remaining--;
+            opt.take();
+            moved = true;
+            break;
+          }
+        }
+        if (!moved) return false;   // 卡在半路：自动完不成
+      }
+      return remaining === 0;
     }
 
     autoFinishStep(): boolean {
