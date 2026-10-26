@@ -1,6 +1,8 @@
 # 纸牌接龙 · Solitaire
 
-> 经典 Windows **Klondike 纸牌接龙**的网页复刻：绿呢牌桌、Win95 灰面板、双层 bevel、七段 LED，全部纯 CSS + 内联 SVG，**零图片、零字体、零运行时依赖**。
+> **在线试玩：<https://jiqinghuang.github.io/solitaire/>** — 打开即玩，无需安装
+
+经典 Windows **Klondike 纸牌接龙**的网页复刻：绿呢牌桌、Win95 灰面板、双层 bevel、七段 LED，全部纯 CSS + 内联 SVG，**零图片、零字体、零运行时依赖**。
 
 ## 玩法
 
