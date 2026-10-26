@@ -18,9 +18,18 @@ jobs:
       - run: npm run build
       - run: node dist/test.js
       - run: node dist/uitest.js
-      # dist 是随仓库提交的编译产物（线上加载的就是它）：
-      # 重新编译后 diff 必须为空，防止改了 src 忘记 build 就提交。
+
+      # dist 是随仓库提交的编译产物（index.html 直接加载它，仓库克隆下来双击就能玩）。
+      # 代价是改了 src 忘记 build 时仓库会与源码脱节，所以这里做一次强校验：
+      # 重新编译后与提交内容必须逐字节一致，否则失败并给出可读的修复指引。
       - name: dist 与 src 同步校验
         run: |
           git add -A dist
-          git diff --cached --ignore-cr-at-eol --exit-code
+          if ! git diff --cached --ignore-cr-at-eol --quiet; then
+            echo "::error::dist/ 与 src/ 不同步——你改了源码但忘了提交编译产物。"
+            echo "本地执行：npm run build && git add dist && git commit"
+            echo "----- 差异摘要 -----"
+            git diff --cached --ignore-cr-at-eol --stat
+            exit 1
+          fi
+          echo "dist/ 与 src/ 一致。"
