@@ -1,9 +1,12 @@
 /* 经典纸牌接龙外观：Win95 灰面板、绿呢牌桌、立体纸牌。
    全部纯 CSS + 内联 SVG，零图片/字体资源。
 
-   尺寸约定（JS metrics() 依赖这几个变量，务必保持「纯 px / 纯数字」）：
-     --card-w / --gap 必须是纯 px，--fan-ratio / --fan-down-ratio 必须是纯数字；
-     --card-h 用 calc() 与牌宽保持比例，JS 从真实牌元素读取计算后的像素高度。 */
+   尺寸约定：
+     --card-w 用 clamp() 随视口自适应（**不是**纯 px），--gap 也随牌宽缩放；
+     --fan-ratio / --fan-down-ratio 必须是纯数字；
+     --card-h 用 calc() 与牌宽保持比例。
+   因为 --card-w 是 clamp()，JS 里的 getPropertyValue 只会拿到未解析的原始字符串，
+   metrics() 必须量真实牌元素的 getBoundingClientRect，不能 parseFloat 变量值。 */
 
 /* ---- 调色与尺寸旋钮 ---- */
 :root {
@@ -17,9 +20,14 @@
   /* 统一采用接近经典 Win95 的 1.35:1；各断点只覆盖牌宽和圆角。
      --card-h 显式使用 calc，JS metrics() 会从真实牌元素读取计算后的像素值。 */
   --card-ratio: 1.35;
-  --card-w: 96px;
+  /* 牌宽随视口伸缩：7 列牌 + 8 个 gap + 牌桌边框要能装进视口。
+     --gap 先按视口定（不依赖牌宽，避免循环引用），再用它算牌宽。
+     预留量 ≈ desktop padding(16) + .win padding(6) + .tablewrap padding(8)
+              + tablewrap margin(12) + 牌桌边框(6) + 安全余量(8) = 56px。
+     clamp 给下限（小屏不碎）与上限（大屏不过度拉伸）。 */
+  --gap: clamp(4px, calc(100vw / 120), 13px);
+  --card-w: clamp(30px, calc((100vw - 56px - var(--gap) * 8 - 6px) / 7), 132px);
   --card-h: calc(var(--card-w) * var(--card-ratio));
-  --gap: 12px;
   --card-radius: calc(var(--card-w) * 0.07);
 
   /* 索引与中央花色使用独立尺寸，避免随牌宽放大后互相挤压。 */
@@ -68,8 +76,9 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 20px;
-  padding: 26px 12px 44px;
+  padding: 10px 8px;
 }
 
 /* ================================ 窗口 ================================ */
@@ -81,7 +90,40 @@ body {
               4px 5px 18px rgba(0, 0, 0, .38);
   padding: 3px;
   border-radius: 2px;
+  /* 窗口宽度跟随牌桌（牌桌宽度又由牌宽决定），所以整扇窗口会随视口缩放。 */
+  width: fit-content;
+  max-width: 100%;
 }
+
+/* 最大化：铺满视口，牌桌居中，牌宽重算 */
+.win.maximized {
+  width: 100%;
+  max-width: none;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0;
+  box-shadow: none;
+}
+.win.maximized .tablewrap {
+  flex: 1 1 auto;
+  display: flex;
+}
+.win.maximized .table {
+  flex: 1 1 auto;
+  margin: 0 auto;
+}
+
+/* 最小化：只留标题栏，牌桌与状态栏收起 */
+.win.minimized .menubar,
+.win.minimized .tablewrap,
+.win.minimized .statusbar { display: none; }
+.win.minimized { cursor: pointer; }
+
+/* 关闭：整扇窗口变灰、牌桌不可点，但保留可读信息 */
+.win.closed .tablewrap,
+.win.closed .statusbar { opacity: .45; pointer-events: none; filter: grayscale(1); }
+.win.closed .titlebar { background: linear-gradient(90deg, #6b6b6b 0%, #8a8a8a 100%); }
 
 .titlebar {
   height: 22px;
@@ -103,6 +145,8 @@ body {
   display: flex; align-items: center; justify-content: center;
 }
 .tbtn svg { width: 8px; height: 7px; }
+.tbtn { cursor: default; }
+.tbtn:hover { background: #d4d4d4; }
 .tbtn:active { box-shadow: inset 1px 1px 0 var(--black), inset -1px -1px 0 var(--light); }
 
 /* ---- 菜单栏 ---- */
@@ -625,18 +669,21 @@ body {
 /* ================================ 响应式 ================================ */
 
 /* 大屏（≥1400px）：用更大的牌 */
+/* 牌宽已由 clamp() 自适应（见 :root 的 --card-w），断点只需处理
+   不随牌宽缩放的东西：间距比例、隐藏装饰、字号下限。 */
+
 @media (min-width: 1400px) {
-  :root { --card-w: 108px; --gap: 13px; }
+  :root { --fan-ratio: 0.23; }
 }
 
 @media (max-width: 1180px) {
-  :root { --card-w: 82px; --gap: 10px; --fan-ratio: 0.25; }
-  .desktop { padding: 20px 10px 36px; gap: 16px; }
+  :root { --fan-ratio: 0.25; }
+  .desktop { padding: 10px 8px; gap: 14px; }
   .table { min-height: 440px; }
 }
 
 @media (max-width: 860px) {
-  :root { --card-w: 66px; --gap: 7px; }
+  :root { --fan-ratio: 0.26; }
   .led-digit { width: 12px; height: 22px; }
   .btn { min-width: 62px; padding: 3px 9px; }
   .table { min-height: 380px; }
@@ -644,8 +691,8 @@ body {
 }
 
 @media (max-width: 560px) {
-  :root { --card-w: 50px; --gap: 5px; --fan-ratio: 0.26; }
-  .desktop { padding: 12px 6px 28px; gap: 12px; }
+  :root { --fan-ratio: 0.28; }
+  .desktop { padding: 6px 4px; gap: 10px; }
   .tbtns { display: none; }
   .statusbar { margin: 4px 3px 0; padding: 4px; }
   .status-mid { gap: 3px; }
@@ -656,8 +703,8 @@ body {
 }
 
 @media (max-width: 420px) {
-  :root { --card-w: 36px; --gap: 4px; --index-size: 9px; --pip-size: 6px; }
-  .desktop { padding-left: 3px; padding-right: 3px; }
+  :root { --index-size: 9px; --pip-size: 6px; }
+  .desktop { padding-left: 2px; padding-right: 2px; }
   .tablewrap { margin-left: 3px; margin-right: 3px; }
   .statusbar { margin-left: 3px; margin-right: 3px; }
   .card .court { border-width: 1px; }

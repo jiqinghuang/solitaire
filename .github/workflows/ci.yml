@@ -18,6 +18,8 @@ jobs:
       - run: npm run build
       - run: node dist/test.js
       - run: node dist/uitest.js
+      - run: node dist/palette.js
+      - run: node dist/layout.js
 
       # dist 是随仓库提交的编译产物（index.html 直接加载它，仓库克隆下来双击就能玩）。
       # 代价是改了 src 忘记 build 时仓库会与源码脱节，所以这里做一次强校验：

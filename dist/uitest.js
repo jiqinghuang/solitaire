@@ -178,6 +178,21 @@ for (const act of ['new', 'restart', 'draw1', 'draw3', 'undo', 'hint', 'autofini
     gameDrop.appendChild(mi);
     miEls[act] = mi;
 }
+/* 标题栏（三个 Win95 装饰按钮，现在有真实行为） */
+const winBox = byId('win');
+winBox.className = 'win';
+const titlebarEl = byId('titlebar');
+titlebarEl.className = 'titlebar';
+const tbtnMin = mkEl('span');
+tbtnMin.className = 'tbtn tbtn-min';
+const tbtnMax = mkEl('span');
+tbtnMax.className = 'tbtn tbtn-max';
+const tbtnClose = mkEl('span');
+tbtnClose.className = 'tbtn tbtn-close';
+titlebarEl.appendChild(tbtnMin);
+titlebarEl.appendChild(tbtnMax);
+titlebarEl.appendChild(tbtnClose);
+winBox.appendChild(titlebarEl);
 /* 按钮与 LED */
 const btnUndo = mkEl('button');
 btnUndo._id = 'btnUndo';
@@ -190,6 +205,9 @@ const ledTime = byId('ledTime');
 const rootEls = {
     '#table': tableEl, '#tableau': tableauEl, '#stock': stockEl, '#waste': wasteEl,
     '#dragLayer': dragLayerEl, '#toast': toastEl,
+    '#win': winBox, '#titlebar': titlebarEl,
+    '.win': winBox, '.titlebar': titlebarEl,
+    '.tbtn-min': tbtnMin, '.tbtn-max': tbtnMax, '.tbtn-close': tbtnClose,
     '#foundS': foundEls.S, '#foundH': foundEls.H, '#foundD': foundEls.D, '#foundC': foundEls.C,
     '#btnUndo': btnUndo, '#btnHint': btnHint, '#btnAuto': btnAuto,
     '#ledScore': ledScore, '#ledTime': ledTime,
@@ -212,6 +230,8 @@ const documentStub = {
     querySelectorAll: (sel) => {
         if (sel === '.menutitle')
             return [gameTitle, helpTitle];
+        if (sel === '.tbtn')
+            return [tbtnMin, tbtnMax, tbtnClose];
         if (sel === '.card.selected') {
             const out = [];
             for (const n of [tableauEl, wasteEl, ...Object.values(foundEls)])
@@ -489,11 +509,23 @@ section('U13 restart 与自动完成的边界', () => {
     ok(stuck.autoFinishStep() === false, '没有合法收牌时 autoFinishStep 返回 false');
     ok(stuck.canAutoFinish() === false, '牌库还有牌时不能自动完成');
 });
-section('U14 metrics 与 CSS 变量一致（支持 calc 牌高）', () => {
+section('U14 metrics 从真实牌元素量尺寸（牌宽已改为 clamp 自适应）', () => {
+    U.newGame();
     const m = U.metrics();
-    ok(m.w === 96 && m.h === 110, '牌宽读取变量，牌高读取真实牌元素');
-    ok(m.fan === 26 && m.fanDown === 20, '明牌/暗牌叠放高度按真实牌高算出');
-    ok(m.gap === 12, '间隙取自纯 px 变量');
+    ok(m.w === 96 && m.h === 110, '牌宽/牌高取自真实牌元素的 getBoundingClientRect');
+    ok(m.fan === Math.round(110 * 0.24), '明牌叠放高度按真实牌高 × fan-ratio 算出');
+    ok(m.fanDown === Math.round(110 * 0.18), '暗牌叠放高度按真实牌高 × fan-down-ratio 算出');
+    ok(m.gap > 0, '间隙为正数（量不到变量时按牌宽推算）');
+    // 回归：--card-w 是 clamp(...) 时，parseFloat 只能拿到下限 36，完全错。
+    // 现在优先量真实牌，所以牌宽变大时 metrics 必须跟着变。
+    // metrics() 探测链最终落到 $('#stock')（stub 只支持简单选择器）
+    const origRect = stockEl.getBoundingClientRect;
+    stockEl.getBoundingClientRect = () => ({ left: 0, top: 0, width: 128, height: 173 });
+    U.render();
+    const big = U.metrics();
+    ok(big.w === 128 && big.h === 173, '牌元素变大时 metrics 跟着变（不会永远返回 clamp 下限）');
+    stockEl.getBoundingClientRect = origRect;
+    U.newGame();
 });
 section('U15 自动完成异步任务与列高边界', () => {
     pendingTimers.clear();
@@ -677,6 +709,48 @@ section('U21 渲染缓存在拖动与自动完成下不漏画（回归）', () =
         const host = foundEls[s];
         ok(host.querySelectorAll('.card').length === 1, s + ' 收牌区渲染出最后一张牌');
     }
+    U.newGame();
+});
+section('U22 标题栏三个按钮真的有作用（回归：旧版只是画上去的）', () => {
+    U.newGame();
+    winBox.classList.remove('maximized', 'minimized', 'closed');
+    U.syncTitleButtons();
+    // 最大化：加 class、图标换成「还原」、再点一次还原
+    ok(tbtnMax.title.includes('最大化'), '初始提示是「最大化」（实际：' + tbtnMax.title + '）');
+    tbtnMax.fire('click', {});
+    ok(winBox.classList.contains('maximized'), '点最大化 → .win 加上 maximized');
+    ok(tbtnMax.title.includes('还原'), '最大化后提示变成「还原」');
+    ok(tbtnMax.innerHTML.includes('4.4'), '图标换成还原样式（两个叠起的小方框）');
+    tbtnMax.fire('click', {});
+    ok(!winBox.classList.contains('maximized'), '再点一次还原回窗口模式');
+    ok(tbtnMax.title.includes('最大化'), '还原后提示恢复');
+    // 最大化后牌宽要重算（不能还拿旧的 metrics 缓存）
+    // metrics() 的探测链：$('#stock .stock-back') → $('.col .card') → $('#stock')。
+    // stub 的 querySelector 只支持简单选择器，所以实际落到 $('#stock')。
+    const origStockRect = stockEl.getBoundingClientRect;
+    stockEl.getBoundingClientRect = () => ({ left: 0, top: 0, width: 120, height: 162 });
+    U.render();
+    ok(U.metrics().w === 120, '前提：新尺寸已被量到（实际：' + U.metrics().w + '）');
+    tbtnMax.fire('click', {});
+    ok(U.metrics().w === 120, '最大化后仍按真实牌尺寸计算');
+    stockEl.getBoundingClientRect = origStockRect;
+    tbtnMax.fire('click', {});
+    // 最小化：藏起牌桌，点标题栏能展开
+    tbtnMin.fire('click', {});
+    ok(winBox.classList.contains('minimized'), '点最小化 → 加上 minimized');
+    ok(tbtnMin.title.includes('展开'), '最小化后提示变成「展开」');
+    titlebarEl.fire('click', { target: titlebarEl });
+    ok(!winBox.classList.contains('minimized'), '点标题栏可展开回来（否则就没入口了）');
+    // 关闭：停牌 + 变灰
+    clickCard(stockEl);
+    const movesBefore = U.engine().moves;
+    ok(movesBefore > 0, '前提：先走一步');
+    tbtnClose.fire('click', {});
+    ok(winBox.classList.contains('closed'), '点关闭 → 加上 closed');
+    ok(toastEl.textContent.includes('新游戏'), '提示告诉玩家怎么重开');
+    // 关闭后牌局仍保留（不自动重开，避免误触丢进度）
+    ok(U.engine().moves === movesBefore, '关闭不会偷偷重开一局');
+    winBox.classList.remove('maximized', 'minimized', 'closed');
     U.newGame();
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);

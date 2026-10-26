@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node dist/test.js && node dist/uitest.js"
+    "test": "npm run build && node dist/test.js && node dist/uitest.js && node dist/palette.js && node dist/layout.js"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

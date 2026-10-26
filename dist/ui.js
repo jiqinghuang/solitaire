@@ -138,32 +138,42 @@ let menuOpen = null;
 const tableEl = () => $('#table');
 const dragLayer = () => $('#dragLayer');
 const tableauEl = () => $('#tableau');
-/* ---- 尺寸：宽度和间距读取纯 px 变量；高度读取 CSS calc 计算后的真实牌高。
-       这样牌高可以始终与牌宽保持同一比例，又不会让 JS 布局与真实画面漂移。
-       fallback 值与 style.css 的 :root 保持一致（仅在拿不到 getComputedStyle 的
-       非浏览器环境生效，例如 uitest 的 DOM stub）。 */
+/* ---- 尺寸：牌宽现在是 CSS clamp() 响应式的，**必须测量真实牌元素**。
+       注意：getPropertyValue('--card-w') 对自定义属性返回的是未解析的原始字符串
+       （形如 "clamp(36px, calc((100vw - 96px) / 7), 132px)"），parseFloat 只会拿到
+       下限 36，完全错。所以这里优先用 getBoundingClientRect 量真牌。
+       量不到时（非浏览器环境、牌库未渲染）才退回读变量的纯 px 值。
+       fallback 值与 style.css 的 :root 保持一致。 */
 function metrics() {
     const cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
     const read = (name, fallback) => {
         const v = parseFloat(String(cs?.getPropertyValue?.(name) ?? ''));
         return Number.isFinite(v) ? v : fallback;
     };
-    const w = read('--card-w', 96);
-    const actualCard = $('#stock .stock-back') ?? $('#stock');
-    const measuredH = actualCard?.getBoundingClientRect?.().height;
+    // 优先量真实牌：牌库的牌背 → 牌阵里的任意一张 → 空槽
+    const probe = $('#stock .stock-back') ?? $('.col .card') ?? $('#stock');
+    const rect = probe?.getBoundingClientRect?.();
+    const measuredW = rect?.width;
+    const measuredH = rect?.height;
+    const w = Number.isFinite(measuredW) && measuredW > 0 ? measuredW : read('--card-w', 96);
     const h = Number.isFinite(measuredH) && measuredH > 0
         ? measuredH
         : Math.round(w * read('--card-ratio', 1.35));
     const fan = Math.round(h * read('--fan-ratio', 0.24));
     const fanDown = Math.round(h * read('--fan-down-ratio', 0.18));
-    const gap = read('--gap', 12);
+    // gap 也可能被 clamp 过，量不到时用牌宽推算（CSS 里 gap = card-w * 0.1，上限 13）
+    const gap = read('--gap', Math.min(13, Math.round(w * 0.1)));
     return { w, h, fan, fanDown, gap };
 }
 /* ---- 渲染 ----
    全量重建几百个 DOM 节点代价不小（拖动、自动完成每秒会调十几次 render）。
    这里给每个牌堆算一个「签名」，签名没变就跳过重绘——牌没动的列不再重建。 */
+/* metrics 缓存：只在**同一次渲染内**复用。
+   牌宽是 CSS clamp() 响应式的，窗口缩放/最大化都会变，所以不能跨渲染持久缓存；
+   但 renderTableau 里要多次用同一组尺寸，那次渲染内复用是安全的。
+   任何布局变化都必须调 invalidateMetrics()。 */
 let metricCache = null;
-/** 读取当前尺寸（带缓存；窗口 resize 时调用 invalidateMetrics()） */
+/** 读取当前尺寸（带缓存；布局变化后必须调 invalidateMetrics()） */
 function metricsCached() {
     if (!metricCache)
         metricCache = metrics();
@@ -190,6 +200,9 @@ function invalidateRenderCache() {
         delete lastSig[k];
 }
 function render() {
+    // 每次渲染都重算尺寸：牌宽由 CSS clamp() 随视口变化，
+    // 上一帧的缓存对当前布局不保证有效（窗口缩放、最大化、字体加载都会改变它）。
+    invalidateMetrics();
     renderStock();
     renderWaste();
     renderFoundations();
@@ -1082,6 +1095,80 @@ function showAbout() {
     toast('经典纸牌接龙 · TypeScript + 原生 DOM，零运行时依赖', 3600);
 }
 /* ---- 事件绑定 ---- */
+/* ---- 标题栏按钮（Win95 三个装饰按钮，现在都接上真实行为） ----
+   旧版三个按钮只是画上去的 <span>，点了没任何反应。
+   这里做成：最大化=铺满视口；最小化=收起牌桌只留标题栏；关闭=停止计时并停牌。 */
+function winEl() { return $('.win'); }
+function isMaximized() {
+    const w = winEl();
+    return !!w?.classList?.contains?.('maximized');
+}
+/** 最大化/还原：切换 .maximized，并让牌宽重新计算 */
+function toggleMaximize() {
+    const w = winEl();
+    if (!w)
+        return;
+    const on = !isMaximized();
+    w.classList.toggle('maximized', on);
+    syncTitleButtons();
+    // 牌宽由 CSS clamp 依据视口算出，切换后真实尺寸变了，必须清掉缓存重绘
+    invalidateMetrics();
+    invalidateRenderCache();
+    render();
+    toast(on ? '已最大化（再点一次还原）' : '已还原窗口', 1200);
+}
+function isMinimized() {
+    return !!winEl()?.classList?.contains?.('minimized');
+}
+/** 最小化/展开：把牌桌、状态栏藏起来，只留标题栏（点击标题栏恢复） */
+function toggleMinimize() {
+    const w = winEl();
+    if (!w)
+        return;
+    const on = !isMinimized();
+    w.classList.toggle('minimized', on);
+    syncTitleButtons();
+    if (!on) {
+        invalidateMetrics();
+        invalidateRenderCache();
+        render();
+    }
+}
+/** 关闭：停掉计时与自动完成，牌局保留（点菜单「新游戏」可重开） */
+function closeWindow() {
+    stopAutoFinish();
+    if (clockTimer) {
+        clearInterval(clockTimer);
+        clockTimer = null;
+    }
+    if (hintTimer) {
+        clearTimeout(hintTimer);
+        hintTimer = null;
+    }
+    const w = winEl();
+    if (w)
+        w.classList.add('closed');
+    syncTitleButtons();
+    toast('已关闭：点「游戏 → 新游戏」重开一局', 3200);
+}
+/** 让按钮的图标/提示与当前状态一致 */
+function syncTitleButtons() {
+    const maxBtn = $('.tbtn-max');
+    const minBtn = $('.tbtn-min');
+    const closeBtn = $('.tbtn-close');
+    const maxed = isMaximized();
+    if (maxBtn) {
+        maxBtn.title = maxed ? '还原（恢复窗口大小）' : '最大化（铺满屏幕）';
+        // 最大化后图标改成「两个叠起来的小方框」（Win95 的还原图标）
+        maxBtn.innerHTML = maxed
+            ? '<svg viewBox="0 0 8 7"><rect x="2.6" y="0.8" width="4.4" height="3.8" fill="none" stroke="#000"/><rect x="1" y="2.4" width="4.4" height="3.8" fill="#c0c0c0" stroke="#000"/></svg>'
+            : '<svg viewBox="0 0 8 7"><rect x="1.2" y="1.2" width="5.6" height="4.6" fill="none" stroke="#000"/></svg>';
+    }
+    if (minBtn)
+        minBtn.title = isMinimized() ? '展开牌桌' : '最小化（收起牌桌）';
+    if (closeBtn)
+        closeBtn.title = '关闭（停止计时，需点「新游戏」重开）';
+}
 function bindEvents() {
     const table = tableEl();
     table.addEventListener('pointerdown', onPointerDown);
@@ -1090,6 +1177,26 @@ function bindEvents() {
     document.addEventListener('pointermove', onPointerMove);
     document.addEventListener('pointerup', onPointerUp);
     document.addEventListener('pointercancel', onPointerCancel);
+    // 标题栏三个按钮（Win95 装饰按钮，现在都有真实行为）
+    $('.tbtn-max')?.addEventListener('click', toggleMaximize);
+    $('.tbtn-min')?.addEventListener('click', toggleMinimize);
+    $('.tbtn-close')?.addEventListener('click', closeWindow);
+    // 最小化后点标题栏可以展开回来（否则牌桌藏起来就没入口了）
+    $('.titlebar')?.addEventListener('click', (e) => {
+        if (e.target?.closest?.('.tbtn'))
+            return; // 点按钮交给按钮自己处理
+        if (isMinimized())
+            toggleMinimize();
+    });
+    // 键盘可达：聚焦按钮后回车/空格触发
+    for (const btn of $$('.tbtn')) {
+        btn.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ')
+                return;
+            e.preventDefault?.();
+            btn.click?.();
+        });
+    }
     // 菜单标题
     for (const title of $$('.menutitle')) {
         title.addEventListener('mousedown', (e) => {
@@ -1228,6 +1335,7 @@ globalThis.__sui = {
     onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
     onMenuItem,
     closeMenu, openMenuOf, toggleMenuById,
+    toggleMaximize, toggleMinimize, closeWindow, syncTitleButtons,
     get passCount() { return passCount; },
     set passCount(v) { passCount = v; },
     ledScore: () => ledScore,
