@@ -618,11 +618,41 @@ section('20 有限前瞻建议：搜索不确定时仍给出合法可执行一�
   const after = rep.suggestion ? V.applyMove(st, rep.suggestion.move, 1) : null;
   ok(after !== null, '建议走法可以真正应用到求解状态');
 
-  const direct = V.recommend(st, 1, { depth: 2, width: 10, nodeLimit: 100 });
+  if (rep.suggestion) {
+    const firstNext = V.applyMove(st, rep.suggestion.move, 1);
+    const firstNextKey = V.stateKey(firstNext);
+    const guarded = V.recommend(st, 1, {
+      depth: 2, width: 10, nodeLimit: 100, avoid: new Set<string>([firstNextKey]),
+    });
+    const guardedNextKey = guarded ? V.stateKey(V.applyMove(st, guarded.move, 1)) : null;
+    ok(guardedNextKey !== firstNextKey, '带避免状态时不会重复把玩家送回刚走过的局面');
+  }  const direct = V.recommend(st, 1, { depth: 2, width: 10, nodeLimit: 100 });
   const pointless = direct && direct.move.kind === 't2t'
     && direct.move.count === st.tab[direct.move.from].length
     && st.tab[direct.move.to].length === 0;
   ok(!pointless, '建议不会推荐「整列搬到另一个空列」这种原地循环');
+});
+section('21 可逆左右倒牌不会形成无限建议循环', () => {
+  // 红桃6 可以从第 1 列移到第 2 列，也可以原路移回；所有局面特征完全一样。
+  const e = EngineCtor.planted({
+    tableau: [
+      [['S', 7, true], ['H', 6, true]],
+      [['C', 7, true]],
+      [], [], [], [], [],
+    ],
+  });
+  const st = V.fromEngine(e);
+
+  const quick = V.analyze(st, 1, { quick: true });
+  ok(quick.verdict === 'unknown' && quick.stalled === true,
+    'quick 能识别「只剩可逆移动」，不再误判为还能推进');
+
+  ok(V.recommend(st, 1, { depth: 6, width: 60, nodeLimit: 12000 }) === null,
+    '没有净进展时不推荐左右倒牌，避免无限循环');
+
+  const full = V.analyze(st, 1, {});
+  ok(full.verdict === 'dead', '完整可达性搜索能处理状态环并证明该局面死局（实际：' + full.verdict + '）');
+  ok(full.suggestion === undefined, '死局不输出误导性的下一步建议');
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

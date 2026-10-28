@@ -624,7 +624,7 @@ section('U17 「分析局面」给出结论与原因', () => {
         ok(tableEl.querySelectorAll('.info-banner').length === 1, '高亮建议后面板保留，便于继续看原因');
     }
     // 完整搜索没结论时，也不能只显示「太复杂」：必须给建议 + 高亮入口
-    U.setEngine(new SOL.Solitaire(lcg(77), () => 0, 1));
+    U.setEngine(new SOL.Solitaire(lcg(1), () => 0, 1));
     U.clearPanel();
     pendingTimers.clear();
     U.analyzeNow();
@@ -820,6 +820,29 @@ section('U23 胜利动画：每门花色都是 K 领头的 13 张牌串', () => 
         globalAny.requestAnimationFrame = oldRaf;
         pendingTimers.clear();
     }
+});
+section('U24 可逆循环：提示不左右倒牌，死局检查给出警示', () => {
+    const e = SOL.Solitaire.planted({
+        tableau: [
+            [['S', 7, true], ['H', 6, true]],
+            [['C', 7, true]],
+            [], [], [], [], [],
+        ],
+    });
+    U.setEngine(e);
+    pendingTimers.clear();
+    btnHint.fire('click', {});
+    ok(toastEl.textContent.includes('没有能推进'), '提示不再推荐可逆的左右倒牌');
+    ok(toastEl.textContent.includes('撤销或重新发牌'), '提示告诉玩家如何脱离循环');
+    U.clearPanel();
+    U.checkDeath();
+    const p = tableEl.querySelectorAll('.info-banner');
+    const title = p[0]?.querySelector('h3')?.textContent ?? '';
+    ok(p.length === 1 && title.includes('没有可推进'), '只剩可逆移动时弹出警示而不是无限提示（实际：' + title + '）');
+    ok(p[0]?.querySelectorAll('.btn').some((b) => b.textContent.includes('分析局面')) === true, '警示面板提供进一步分析入口');
+    U.clearPanel();
+    U.newGame();
+    pendingTimers.clear();
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

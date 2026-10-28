@@ -49,6 +49,8 @@ interface SolverOpts {
   timeLimit?: number;
   /** 只判断「还有没有得走」，不做搜索 */
   quick?: boolean;
+  /** 本轮提示已经走过的状态，推荐时避免回到这些状态；不影响完整搜索判定 */
+  avoidSuggestionStates?: Set<string>;
 }
 
 /** 有限前瞻给出的可执行建议：即使无法证明输赢，也能告诉玩家「下一步先走哪里」。 */
@@ -72,6 +74,8 @@ interface SolverReport {
   winningLine?: SMove[];
   /** 当前局面最值得先尝试的一步；死局时为空 */
   suggestion?: SolverSuggestion;
+  /** quick 判定：还有合法走法，但只剩可逆/无净收益移动 */
+  stalled?: boolean;
 }
 
 /** 从引擎只读视图构建求解状态所需的最小接口 */
@@ -298,7 +302,6 @@ interface EngineView {
 
   interface Ctx {
     pass: PassCount;
-    memo: Map<string, Verdict>;
     nodes: number;
     nodeLimit: number;
     deadline: number;
@@ -364,6 +367,40 @@ interface EngineView {
     });
   }
 
+  /** 这一步是否带来可见净进展；只用于「建议」过滤，不用于完整正确性判定。
+      可逆的 t2t 换位如果不翻开暗牌、不腾空列、也没有让新顶牌变得可收/可接，
+      就是典型的「左移右移」循环来源，不应作为提示。 */
+  function isProductiveMove(st: SState, mv: SMove, pass: PassCount): boolean {
+    switch (mv.kind) {
+      case 'w2f':
+      case 't2f':
+        return true;
+      case 'w2t':
+        return true;                 // 废牌堆的牌进入了牌阵，不会原路返回废牌堆
+      case 'draw':
+        return st.stock.length > 0 || recycleUnlocks(st, pass);
+      case 'f2t':
+        return false;                // 先不主动建议从收牌区拉回
+      case 't2t': {
+        const pile = st.tab[mv.from];
+        if (mv.reveals) return true;
+        if (mv.count === pile.length) return st.tab[mv.to].length > 0; // 腾出空列
+        const exposedIndex = pile.length - mv.count - 1;
+        const exposed = pile[exposedIndex];
+        if (!st.up[mv.from][exposedIndex]) return true;
+        if (st.found[suitIdx(exposed)] === rankOf(exposed) - 1) return true;
+        for (let j = 0; j < 7; j++) {
+          if (j !== mv.from && canPlace(st, exposed, j)) return true;
+        }
+        return false;
+      }
+    }
+  }
+
+  /** 是否至少有一条「能带来净进展」的合法走法。 */
+  function hasProductiveMove(st: SState, pass: PassCount): boolean {
+    return moves(st, pass).some((mv) => isProductiveMove(st, mv, pass));
+  }
   function suggestionReason(st: SState, mv: SMove): string {
     switch (mv.kind) {
       case 't2f':
@@ -383,6 +420,8 @@ interface EngineView {
   }
 
   interface RecommendOpts {
+    /** 已访问过的状态；避免提示在同样的局面之间循环 */
+    avoid?: Set<string>;
     /** 最多向前看几层；不是完整搜索，成本受 nodeLimit 限制 */
     depth?: number;
     /** 每层保留的最有希望状态数 */
@@ -404,12 +443,12 @@ interface EngineView {
     const depth = Math.max(1, opts.depth ?? 4);
     const width = Math.max(1, opts.width ?? 40);
     const nodeLimit = Math.max(1, opts.nodeLimit ?? 4000);
-    const rootMoves = usefulMoves(st, pass);
+    const rootMoves = usefulMoves(st, pass).filter((mv) => isProductiveMove(st, mv, pass));
     if (!rootMoves.length) return null;
 
     let layer: RecommendCandidate[] = [];
     let nodes = 0;
-    const seen = new Set<string>([keyOf(st)]);
+    const seen = new Set<string>([keyOf(st), ...(opts.avoid ?? [])]);
 
     for (const mv of rootMoves) {
       if (nodes++ >= nodeLimit) break;
@@ -458,59 +497,47 @@ interface EngineView {
       ? { move: best.first, text: describeMove(st, best.first), reason: suggestionReason(st, best.first), score: best.score }
       : null;
   }
-/** 从已填好转移表的搜索中回溯出一条必胜路线。
-      只有 dfs 判定为 win 后才会调用；memo 里已存有每个后继的结论，回溯本身几乎不花时间。 */
-  function extractLine(st: SState, ctx: Ctx): SMove[] | null {
-    const line: SMove[] = [];
-    let cur = st;
-    for (let guard = 0; guard < 300 && !isWin(cur); guard++) {
-      let picked: SMove | null = null;
-      for (const m of orderMoves(moves(cur, ctx.pass), cur)) {
-        const next = applyMove(cur, m, ctx.pass);
-        if (isWin(next) || ctx.memo.get(keyOf(next)) === 'win') { picked = m; break; }
+
+  type SearchResult = { verdict: 'win'; line: SMove[] } | { verdict: 'dead' | 'unknown'; line?: undefined };
+
+  /** 带全局 visited 的可达性搜索。
+      DFS 的 memo 只能记住已有结论，遇到 A→B→A 这种环会一直递归到深度上限，
+      于是明明只有 200 个状态也会返回 unknown。这里每个状态只展开一次：
+      若目标不可达，遍历完整个可达状态图就返回 dead；超出节点/时间上限才返回 unknown。
+      对单人游戏，重复回到已访问状态不会产生新结果，所以跳过回边是安全的。 */
+  function searchReachable(root: SState, ctx: Ctx): SearchResult {
+    const visited = new Set<string>();
+    const path: SMove[] = [];
+
+    const walk = (st: SState, depth: number): 'win' | 'dead' | 'unknown' => {
+      if (isWin(st)) return 'win';
+      const key = keyOf(st);
+      if (visited.has(key)) return 'dead';
+      if (depth > 600 || ctx.nodes >= ctx.nodeLimit || Date.now() > ctx.deadline) {
+        ctx.overflow = true;
+        return 'unknown';
       }
-      if (!picked) return line.length ? line : null;
-      line.push(picked);
-      cur = applyMove(cur, picked, ctx.pass);
-    }
-    return isWin(cur) ? line : null;
-  }
+      ctx.nodes++;
+      visited.add(key);
 
-  function dfs(st: SState, depth: number, ctx: Ctx): Verdict {
-    if (isWin(st)) return 'win';
-    if (ctx.nodes++ >= ctx.nodeLimit || depth > 200 || Date.now() > ctx.deadline) {
-      ctx.overflow = true;
-      return 'unknown';
-    }
-    const key = keyOf(st);
-    const seen = ctx.memo.get(key);
-    if (seen) return seen;
-
-    const list = moves(st, ctx.pass);
-    if (!list.length) {
-      ctx.memo.set(key, 'dead');
-      return 'dead';
-    }
-    let sawDead = false;
-    let sawUnknown = false;
-    for (const m of orderMoves(list, st)) {
-      const r = dfs(applyMove(st, m, ctx.pass), depth + 1, ctx);
-      if (r === 'win') {
-        ctx.memo.set(key, 'win');
-        return 'win';
+      const list = moves(st, ctx.pass);
+      if (!list.length) return 'dead';
+      for (const mv of orderMoves(list, st)) {
+        const next = applyMove(st, mv, ctx.pass);
+        const nextKey = keyOf(next);
+        if (visited.has(nextKey)) continue;
+        path.push(mv);
+        const result = walk(next, depth + 1);
+        if (result === 'win') return 'win';
+        path.pop();
+        if (result === 'unknown') return 'unknown';
       }
-      if (r === 'dead') sawDead = true;
-      else sawUnknown = true;
-    }
-    // 只有「所有后继都被证明是死局」才能断定死局；有 unknown 就不能下结论
-    if (sawUnknown) return 'unknown';
-    if (sawDead) {
-      ctx.memo.set(key, 'dead');
       return 'dead';
-    }
-    return 'unknown';
-  }
+    };
 
+    const verdict = walk(root, 0);
+    return verdict === 'win' ? { verdict, line: path.slice() } : { verdict };
+  }
   /* ============================ 死局原因诊断 ============================ */
 
   /** 某张牌目前有没有任何去处（牌阵或收牌区） */
@@ -656,34 +683,43 @@ interface EngineView {
       reasons: string[],
       line?: SMove[],
       suggestion?: SolverSuggestion,
+      stalled?: boolean,
     ): SolverReport => ({
-      verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line, suggestion,
+      verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line, suggestion, stalled,
     });
 
     if (opts.quick) {
-      // quick 只回答「现在真的还有能推进局面的走法吗」。
-      // 注意：只看 hasAnyMove 不够——draw-1 下回收废牌堆会翻出埋在堆底的新牌，
-      // 但翻出来也可能无处可去，所以要真的检查那张牌能不能动。
-      const alive = hasAnyMove(st, pass) || recycleUnlocks(st, pass);
-      return report(alive ? 'unknown' : 'dead', 0, alive
-        ? ['还有合法走法，暂时没被将死。']
-        : diagnose(st, pass));
+      // quick 只判断「现在是否还有净进展」，不做完整证明。
+      // 可逆的 t2t 来回移动虽然合法，但不应让它误以为牌局还能继续推进。
+      const recyclable = recycleUnlocks(st, pass);
+      const alive = hasAnyMove(st, pass) || recyclable;
+      if (!alive) return report('dead', 0, diagnose(st, pass));
+      const productive = hasProductiveMove(st, pass) || recyclable;
+      if (!productive) {
+        return report('unknown', 0, [
+          '当前只剩可逆或没有净收益的合法移动，继续左右倒牌不会带来进展。',
+          ...diagnose(st, pass, true).slice(0, 2),
+        ], undefined, undefined, true);
+      }
+      return report('unknown', 0, ['还有能推进局面的合法走法。']);
     }
 
     const ctx: Ctx = {
       pass,
-      memo: new Map(),
       nodes: 0,
       nodeLimit: opts.nodeLimit ?? 40000,
       deadline: t0 + (opts.timeLimit ?? 400),
       overflow: false,
     };
-    let verdict = dfs(st, 0, ctx);
-    let line: SMove[] | undefined = verdict === 'win' ? (extractLine(st, ctx) ?? undefined) : undefined;
+    const searched = searchReachable(st, ctx);
+    let verdict = searched.verdict;
+    let line = searched.line;
 
     // 完整搜索证明不了输赢时，不直接甩一句「太复杂」：用有限前瞻给出当前最值得尝试的一步。
     // 若前瞻真的走完整局，则那条路线本身就是构造性证明，可以放心升级为 win。
-    const suggestion = recommend(st, pass, { depth: 6, width: 60, nodeLimit: 12000 });
+    const suggestion: SolverSuggestion | null = verdict === 'unknown'
+      ? recommend(st, pass, { depth: 6, width: 60, nodeLimit: 12000, avoid: opts.avoidSuggestionStates })
+      : null;
     if (verdict === 'unknown' && suggestion?.winningPath?.length) {
       verdict = 'win';
       line = suggestion.winningPath;
@@ -697,7 +733,11 @@ interface EngineView {
     } else {
       reasons = ['完整搜索在节点/时间上限内没有结束，因此不谎报输赢。'];
       reasons.push(...diagnose(st, pass, true).slice(0, 3));
-      reasons.push('下面是有限前瞻给出的可执行建议；它有帮助，但不代表已经证明必胜。');
+      if (suggestion) {
+        reasons.push('下面是有限前瞻给出的可执行建议；它有帮助，但不代表已经证明必胜。');
+      } else {
+        reasons.push('当前没有找到有明显净进展的建议；可能只剩可逆移动或需要撤销几步重试。');
+      }
     }
 
     if (line && line.length) {
@@ -727,6 +767,7 @@ interface EngineView {
     applyMove,
     canPlace,
     describeMove,
+    stateKey: keyOf,
     cardIndex,
     suitOf,
     rankOf,

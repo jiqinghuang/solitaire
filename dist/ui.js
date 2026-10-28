@@ -130,6 +130,9 @@ let autoPromptShown = false;
 let autoFinishTimer = null;
 let gameGeneration = 0;
 let hintTimer = null;
+/** 提示/分析走过的局面；用于阻断 A→B→A 这类提示循环。 */
+let hintVisited = new Set();
+let lastHintKey = null;
 let winTimer = null;
 let clockTimer = null;
 let toastTimer = null;
@@ -744,21 +747,50 @@ function showHintObject(h) {
         dstHost.classList.add('hint-dst');
     hintTimer = setTimeout(clearHint, 2800);
 }
+function resetHintHistory() {
+    hintVisited = new Set();
+    lastHintKey = null;
+}
+/** 记录当前提示状态；返回 false 表示回到了已经提示过的局面（循环）。 */
+function enterHintState(st) {
+    const key = Solver.stateKey(st);
+    if (key === lastHintKey)
+        return true; // 同一局面重复点提示，仍显示同一条建议
+    if (hintVisited.has(key)) {
+        toast('检测到提示循环：继续走会回到之前的局面。建议撤销或重新发牌。', 3000);
+        return false;
+    }
+    hintVisited.add(key);
+    lastHintKey = key;
+    return true;
+}
+/** 分析只记录新状态，不阻断分析；循环检测用于它内部的建议生成。 */
+function rememberHintState(st) {
+    const key = Solver.stateKey(st);
+    if (key !== lastHintKey && !hintVisited.has(key)) {
+        hintVisited.add(key);
+        lastHintKey = key;
+    }
+}
 function showHint() {
     if (engine.phase === 'won')
         return;
     // 优先使用求解器的有限前瞻建议，而不是只看一层的 engine.hint()。
     // 求解器仍可能返回 unknown，但 recommendation 始终是合法且当前评分最高的一步。
     const st = Solver.fromEngine(engine);
-    const sug = Solver.recommend(st, engine.passCount, { depth: 4, width: 40, nodeLimit: 4000 });
-    const h = sug ? hintFromSuggestion(st, sug) : engine.hint();
+    if (!enterHintState(st))
+        return;
+    const sug = Solver.recommend(st, engine.passCount, {
+        depth: 4, width: 40, nodeLimit: 4000, avoid: hintVisited,
+    });
+    const h = sug ? hintFromSuggestion(st, sug) : null;
     if (!h) {
-        toast('暂时没有可走的牌了，可以撤销或重新发牌', 1800);
+        // 不再退回 engine.hint()：那会把可逆的左右倒牌继续当成建议，形成无限循环。
+        toast('当前没有能推进局面的走法，可能只剩可逆移动；建议撤销或重新发牌', 2800);
         return;
     }
     // 把「为什么推荐」也放进提示，避免只看到移动文案却不知道价值。
-    if (sug)
-        h.text += '（' + sug.reason + '）';
+    h.text += '（' + sug.reason + '）';
     showHintObject(h);
 }
 /* ---- 自动完成 ---- */
@@ -813,6 +845,7 @@ function autoFinish() {
 function newGame(pass, rand, clock) {
     stopAutoFinish();
     clearPanel();
+    resetHintHistory();
     if (pass !== undefined)
         passCount = pass;
     autoPromptShown = false;
@@ -830,6 +863,7 @@ function newGame(pass, rand, clock) {
 function restart() {
     stopAutoFinish();
     clearPanel();
+    resetHintHistory();
     autoPromptShown = false;
     if (winTimer) {
         clearTimeout(winTimer);
@@ -849,6 +883,7 @@ function undo() {
         toast('没有可撤销的操作', 1200);
         return;
     }
+    resetHintHistory();
     clearWinArtifacts();
     if (winTimer) {
         clearTimeout(winTimer);
@@ -1141,13 +1176,22 @@ function checkDeath() {
         return;
     const st = Solver.fromEngine(engine);
     const rep = Solver.analyze(st, engine.passCount, { quick: true });
-    if (rep.verdict !== 'dead')
+    if (rep.verdict === 'dead') {
+        showPanel('这局已经无法继续', '没有任何能推进局面的走法了。可以撤销几步试试，或者重新发牌。', rep.reasons, [
+            ['撤销一步', () => undo()],
+            ['重新发牌', () => restart()],
+            ['关闭', () => { }],
+        ]);
         return;
-    showPanel('这局已经无法继续', '没有任何能推进局面的走法了。可以撤销几步试试，或者重新发牌。', rep.reasons, [
-        ['撤销一步', () => undo()],
-        ['重新发牌', () => restart()],
-        ['关闭', () => { }],
-    ]);
+    }
+    if (rep.stalled) {
+        showPanel('当前没有可推进的走法', '还有合法移动，但只剩可逆或没有净收益的来回倒牌，继续移动不会带来进展。这不等于已经证明死局；可以让求解器进一步分析，或撤销/重新发牌。', rep.reasons, [
+            ['撤销一步', () => undo()],
+            ['重新发牌', () => restart()],
+            ['分析局面', () => analyzeNow()],
+            ['关闭', () => { }],
+        ]);
+    }
 }
 /** 底栏按钮 / 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态。
     求解是同步 CPU 密集任务，直接跑会卡死界面（拖牌、按钮全部无响应）。
@@ -1161,6 +1205,7 @@ function analyzeNow() {
     clearPanel();
     toast('正在分析局面…', 6000);
     const st = Solver.fromEngine(engine);
+    rememberHintState(st);
     const pass = engine.passCount;
     const generation = gameGeneration;
     const finish = (rep) => {
@@ -1186,7 +1231,9 @@ function analyzeNow() {
     const heavy = () => {
         if (generation !== gameGeneration)
             return;
-        const rep = Solver.analyze(st, pass, { nodeLimit: 60000, timeLimit: 700 });
+        const rep = Solver.analyze(st, pass, {
+            nodeLimit: 60000, timeLimit: 700, avoidSuggestionStates: hintVisited,
+        });
         finish(rep);
     };
     const nextFrame = (fn) => {
