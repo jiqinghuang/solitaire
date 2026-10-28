@@ -51,6 +51,16 @@ interface SolverOpts {
   quick?: boolean;
 }
 
+/** 有限前瞻给出的可执行建议：即使无法证明输赢，也能告诉玩家「下一步先走哪里」。 */
+interface SolverSuggestion {
+  move: SMove;
+  text: string;
+  reason: string;
+  score: number;
+  /** 若有限前瞻真的走通了一整局，这里会带完整路线；路线可验证，因此可升级为 win。 */
+  winningPath?: SMove[];
+}
+
 interface SolverReport {
   verdict: Verdict;
   /** 人话解释：为什么会这样 */
@@ -58,8 +68,10 @@ interface SolverReport {
   /** 搜索到的节点数（便于观测求解难度） */
   nodes: number;
   elapsedMs: number;
-  /** 若可胜，给出一个能赢的第一步（仅在判定 win 时给出） */
+  /** 若可胜，给出一条能赢的路线；至少包含第一步 */
   winningLine?: SMove[];
+  /** 当前局面最值得先尝试的一步；死局时为空 */
+  suggestion?: SolverSuggestion;
 }
 
 /** 从引擎只读视图构建求解状态所需的最小接口 */
@@ -316,7 +328,137 @@ interface EngineView {
     }
   }
 
-  /** 从已填好转移表的搜索中回溯出一条必胜路线。
+    /** 局面评估：收牌 > 翻开暗牌 > 空列 > 可立即收牌/机动性。
+      搜索证明不了输赢时，至少用这个分数选出「最像进展」的下一步。 */
+  function evaluateState(st: SState): number {
+    const found = st.found[0] + st.found[1] + st.found[2] + st.found[3];
+    let hidden = 0;
+    let faceUp = 0;
+    let emptyColumns = 0;
+    let foundationReady = 0;
+    let mobility = 0;
+    for (let i = 0; i < 7; i++) {
+      const pile = st.tab[i];
+      if (!pile.length) { emptyColumns++; continue; }
+      for (let k = 0; k < pile.length; k++) {
+        if (st.up[i][k]) faceUp++;
+        else hidden++;
+      }
+      const top = pile[pile.length - 1];
+      if (st.up[i][pile.length - 1]) {
+        if (st.found[suitIdx(top)] === rankOf(top) - 1) foundationReady++;
+        for (let j = 0; j < 7; j++) if (j !== i && canPlace(st, top, j)) mobility++;
+      }
+    }
+    const wasteTop = st.waste.length ? st.waste[st.waste.length - 1] : -1;
+    if (wasteTop >= 0 && st.found[suitIdx(wasteTop)] === rankOf(wasteTop) - 1) foundationReady++;
+    return found * 1000 - hidden * 90 + faceUp * 7 + emptyColumns * 110
+      + foundationReady * 40 + Math.min(20, mobility) * 2;
+  }
+
+  /** 推荐时过滤掉「整列搬到另一个空列」这种没有信息增益的循环走法。 */
+  function usefulMoves(st: SState, pass: PassCount): SMove[] {
+    return moves(st, pass).filter((mv) => {
+      if (mv.kind !== 't2t') return true;
+      return !(mv.count === st.tab[mv.from].length && st.tab[mv.to].length === 0);
+    });
+  }
+
+  function suggestionReason(st: SState, mv: SMove): string {
+    switch (mv.kind) {
+      case 't2f':
+      case 'w2f':
+        return '直接推进收牌区';
+      case 't2t':
+        if (mv.reveals) return '能翻开暗牌';
+        if (mv.count === st.tab[mv.from].length) return '能腾出空列';
+        return '为后续接牌或翻牌做准备';
+      case 'w2t':
+        return '把废牌堆的牌接回牌阵';
+      case 'f2t':
+        return '必要时从收牌区取回一张牌来解局';
+      case 'draw':
+        return st.stock.length ? '现有牌阵没有更直接的推进，先探查牌库' : '牌库已空，回收废牌堆重新探查';
+    }
+  }
+
+  interface RecommendOpts {
+    /** 最多向前看几层；不是完整搜索，成本受 nodeLimit 限制 */
+    depth?: number;
+    /** 每层保留的最有希望状态数 */
+    width?: number;
+    /** 最多展开多少个后继状态 */
+    nodeLimit?: number;
+  }
+
+  interface RecommendCandidate {
+    st: SState;
+    first: SMove;
+    path: SMove[];
+    score: number;
+  }
+
+  /** 有限前瞻推荐：不追求证明，只保证给玩家一个合法、目前看起来最有进展的第一步。
+      若前瞻中真的走完整局，则返回可验证的 winningPath（按它走确实能收满 52 张）。 */
+  function recommend(st: SState, pass: PassCount, opts: RecommendOpts = {}): SolverSuggestion | null {
+    const depth = Math.max(1, opts.depth ?? 4);
+    const width = Math.max(1, opts.width ?? 40);
+    const nodeLimit = Math.max(1, opts.nodeLimit ?? 4000);
+    const rootMoves = usefulMoves(st, pass);
+    if (!rootMoves.length) return null;
+
+    let layer: RecommendCandidate[] = [];
+    let nodes = 0;
+    const seen = new Set<string>([keyOf(st)]);
+
+    for (const mv of rootMoves) {
+      if (nodes++ >= nodeLimit) break;
+      const next = applyMove(st, mv, pass);
+      const path = [mv];
+      const score = evaluateState(next);
+      if (isWin(next)) {
+        return { move: mv, text: describeMove(st, mv), reason: '这一步之后已经收满 52 张', score, winningPath: path };
+      }
+      const key = keyOf(next);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      layer.push({ st: next, first: mv, path, score });
+    }
+
+    layer.sort((a, b) => b.score - a.score);
+    if (!layer.length) return null;
+    if (layer.length > width) layer = layer.slice(0, width);
+    let best = layer[0];
+
+    for (let d = 1; d < depth && layer.length && nodes < nodeLimit; d++) {
+      const nextLayer: RecommendCandidate[] = [];
+      for (const cur of layer) {
+        for (const mv of usefulMoves(cur.st, pass)) {
+          if (nodes++ >= nodeLimit) break;
+          const next = applyMove(cur.st, mv, pass);
+          const path = cur.path.concat([mv]);
+          const score = evaluateState(next);
+          if (isWin(next)) {
+            return { move: cur.first, text: describeMove(st, cur.first), reason: '有限前瞻中找到一条完整胜利路线', score, winningPath: path };
+          }
+          const key = keyOf(next);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          nextLayer.push({ st: next, first: cur.first, path, score });
+        }
+        if (nodes >= nodeLimit) break;
+      }
+      if (!nextLayer.length) break;
+      nextLayer.sort((a, b) => b.score - a.score);
+      layer = nextLayer.slice(0, width);
+      if (layer[0].score > best.score) best = layer[0];
+    }
+
+    return best
+      ? { move: best.first, text: describeMove(st, best.first), reason: suggestionReason(st, best.first), score: best.score }
+      : null;
+  }
+/** 从已填好转移表的搜索中回溯出一条必胜路线。
       只有 dfs 判定为 win 后才会调用；memo 里已存有每个后继的结论，回溯本身几乎不花时间。 */
   function extractLine(st: SState, ctx: Ctx): SMove[] | null {
     const line: SMove[] = [];
@@ -393,7 +535,7 @@ interface EngineView {
     return false;
   }
 
-  function diagnose(st: SState, pass: PassCount): string[] {
+  function diagnose(st: SState, pass: PassCount, uncertain = false): string[] {
     const reasons: string[] = [];
     const alive = hasAnyMove(st, pass);
 
@@ -413,7 +555,8 @@ interface EngineView {
         if (st.up[i][k]) continue;
         if (!canExposeColumn(st, i, k)) {
           reasons.push(SUIT_NAME[suitOf(pile[k])] + RANK_NAME[rankOf(pile[k])]
-            + '被压在第 ' + (i + 1) + ' 列的暗牌下面，而它上面的牌无处可去，这张牌永远翻不开。');
+            + '被压在第 ' + (i + 1) + ' 列的暗牌下面，而它上面的牌暂时无处可去，'
+            + (uncertain ? '当前没有立刻翻开它的走法。' : '这张牌永远翻不开。'));
           buriedCount++;
           break;
         }
@@ -434,14 +577,14 @@ interface EngineView {
     for (const b of blocked.slice(0, 3)) {
       const r = rankOf(b);
       if (r === 13) {
-        reasons.push(cardText(b) + '无处可去：只有空列才接 K，而牌阵现在腾不出空列。');
+        reasons.push(cardText(b) + (uncertain ? '暂时无处可去：' : '无处可去：') + '只有空列才接 K，而牌阵现在腾不出空列。');
       } else {
         const opp = r + 1;
         // 红牌只能压在黑牌上，黑牌只能压在红牌上
         const need = isRedIdx(b)
           ? SUIT_NAME.S + RANK_NAME[opp] + ' 或 ' + SUIT_NAME.C + RANK_NAME[opp]
           : SUIT_NAME.H + RANK_NAME[opp] + ' 或 ' + SUIT_NAME.D + RANK_NAME[opp];
-        reasons.push(cardText(b) + '无处可去：它只能压在' + need + '上，而这两张都不在可动的顶牌位置。');
+        reasons.push(cardText(b) + (uncertain ? '暂时无处可去：' : '无处可去：') + '它只能压在' + need + '上，而这两张当前都不在可动的顶牌位置。');
       }
     }
 
@@ -479,9 +622,11 @@ interface EngineView {
     }
 
     if (!reasons.length) {
-      reasons.push(alive
-        ? '暂时看不出结构性死因，可能还需要翻几张牌才能确定。'
-        : '局面已经动弹不得。');
+      reasons.push(uncertain
+        ? '暂时看不出结构性卡点，继续尝试翻牌或调整牌阵。'
+        : alive
+          ? '暂时看不出结构性死因，可能还需要翻几张牌才能确定。'
+          : '局面已经动弹不得。');
     }
     return reasons;
   }
@@ -505,8 +650,14 @@ interface EngineView {
   }
   function analyze(st: SState, pass: PassCount, opts: SolverOpts = {}): SolverReport {
     const t0 = Date.now();
-    const report = (verdict: Verdict, nodes: number, reasons: string[], line?: SMove[]): SolverReport => ({
-      verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line,
+    const report = (
+      verdict: Verdict,
+      nodes: number,
+      reasons: string[],
+      line?: SMove[],
+      suggestion?: SolverSuggestion,
+    ): SolverReport => ({
+      verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line, suggestion,
     });
 
     if (opts.quick) {
@@ -527,19 +678,48 @@ interface EngineView {
       deadline: t0 + (opts.timeLimit ?? 400),
       overflow: false,
     };
-    const verdict = dfs(st, 0, ctx);
-    const reasons = verdict === 'dead'
-      ? diagnose(st, pass)
-      : verdict === 'win'
-        ? ['这局还有解，按提示走就能赢。']
-        : ['局面太复杂，在限定时间内没搜出结论（不代表赢不了，也不代表一定输）。'];
-    const line = verdict === 'win' ? extractLine(st, ctx) : undefined;
-    if (line && line.length) reasons.push('必胜第一步：' + describeMove(st, line[0]));
-    return report(verdict, ctx.nodes, reasons, line ?? undefined);
-  }
+    let verdict = dfs(st, 0, ctx);
+    let line: SMove[] | undefined = verdict === 'win' ? (extractLine(st, ctx) ?? undefined) : undefined;
 
+    // 完整搜索证明不了输赢时，不直接甩一句「太复杂」：用有限前瞻给出当前最值得尝试的一步。
+    // 若前瞻真的走完整局，则那条路线本身就是构造性证明，可以放心升级为 win。
+    const suggestion = recommend(st, pass, { depth: 6, width: 60, nodeLimit: 12000 });
+    if (verdict === 'unknown' && suggestion?.winningPath?.length) {
+      verdict = 'win';
+      line = suggestion.winningPath;
+    }
+
+    let reasons: string[];
+    if (verdict === 'dead') {
+      reasons = diagnose(st, pass);
+    } else if (verdict === 'win') {
+      reasons = ['求解器已找到一条完整胜利路线。'];
+    } else {
+      reasons = ['完整搜索在节点/时间上限内没有结束，因此不谎报输赢。'];
+      reasons.push(...diagnose(st, pass, true).slice(0, 3));
+      reasons.push('下面是有限前瞻给出的可执行建议；它有帮助，但不代表已经证明必胜。');
+    }
+
+    if (line && line.length) {
+      reasons.push('必胜第一步：' + describeMove(st, line[0]));
+    } else if (suggestion) {
+      reasons.push('建议先走：' + suggestion.text + '（' + suggestion.reason + '）');
+    }
+
+    const actionable = line && line.length
+      ? {
+          move: line[0],
+          text: describeMove(st, line[0]),
+          reason: '求解器已证明存在完整胜利路线',
+          score: Number.MAX_SAFE_INTEGER,
+          winningPath: line,
+        }
+      : suggestion;
+    return report(verdict, ctx.nodes, reasons, line, actionable ?? undefined);
+  }
   return {
     analyze,
+    recommend,
     diagnose,
     fromEngine,
     hasAnyMove,

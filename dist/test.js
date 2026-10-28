@@ -565,6 +565,7 @@ section('19 winningLine 必须真的给出一条能赢的路线', () => {
     ok(rep.verdict === 'win', '前提：判为可胜');
     ok(Array.isArray(rep.winningLine) && rep.winningLine.length > 0, 'win 时给出 winningLine（回归：以前永远是 undefined）');
     ok(rep.reasons.some((r) => r.includes('必胜第一步')), '原因里带上了第一步的说明');
+    ok(!!rep.suggestion && Array.isArray(rep.suggestion.winningPath) && rep.suggestion.winningPath.length > 0, 'win 时 suggestion 也带可执行路线');
     // 把 winningLine 逐步应用到状态上，必须真的能走到 52 张收完
     let cur = st;
     let steps = 0;
@@ -574,6 +575,25 @@ section('19 winningLine 必须真的给出一条能赢的路线', () => {
     }
     const total = cur.found.reduce((a, b) => a + b, 0);
     ok(total === 52, '按 winningLine 走到底确实收满 52 张（走了 ' + steps + ' 步）');
+});
+section('20 有限前瞻建议：搜索不确定时仍给出合法可执行一步', () => {
+    const e = new EngineCtor(lcg(2026), () => 0, 1);
+    const st = V.fromEngine(e);
+    const rep = V.analyze(st, 1, { nodeLimit: 1, timeLimit: 1 });
+    ok(rep.verdict === 'unknown', '前提：极低搜索上限返回 unknown');
+    ok(!!rep.suggestion, 'unknown 时仍带 suggestion，而不是只丢一句太复杂');
+    ok(rep.reasons.some((r) => r.includes('建议先走')), '原因里给出可执行建议');
+    ok(!rep.reasons.some((r) => r.includes('永远翻不开')), '未知状态不把当前卡点说成已证明死因');
+    const legal = new Set(V.moves(st, 1).map(mvKey));
+    ok(!!rep.suggestion && legal.has(mvKey(rep.suggestion.move)), '建议必须是当前局面的合法走法');
+    ok(!!rep.suggestion && rep.suggestion.text.length > 0, '建议带可读文案');
+    const after = rep.suggestion ? V.applyMove(st, rep.suggestion.move, 1) : null;
+    ok(after !== null, '建议走法可以真正应用到求解状态');
+    const direct = V.recommend(st, 1, { depth: 2, width: 10, nodeLimit: 100 });
+    const pointless = direct && direct.move.kind === 't2t'
+        && direct.move.count === st.tab[direct.move.from].length
+        && st.tab[direct.move.to].length === 0;
+    ok(!pointless, '建议不会推荐「整列搬到另一个空列」这种原地循环');
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

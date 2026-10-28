@@ -401,6 +401,7 @@ function tryMove(src, dst) {
         toast(res.reason, 1400);
         return false;
     }
+    clearPanel();
     clearTransient();
     render();
     checkAutoFinishPrompt();
@@ -670,6 +671,7 @@ function doDraw() {
         return;
     stopAutoFinish();
     const r = engine.draw();
+    clearPanel();
     clearTransient();
     render();
     if (r.recycled)
@@ -686,31 +688,78 @@ function clearHint() {
     for (const n of $$('.hint-src, .hint-dst'))
         n.classList.remove('hint-src', 'hint-dst');
 }
+/** 求解器的有限前瞻建议 → UI 可直接高亮的来源/目标。
+    这一步只做坐标转换，不改变牌局。 */
+function hintFromSuggestion(st, suggestion) {
+    const mv = suggestion?.move;
+    if (!mv)
+        return null;
+    const text = suggestion.text;
+    const wasteTop = () => st.waste[st.waste.length - 1];
+    const tabTop = (i) => st.tab[i][st.tab[i].length - 1];
+    switch (mv.kind) {
+        case 'draw':
+            return { from: { kind: 'stock' }, count: 0, to: { kind: 'stock' }, text };
+        case 'w2f':
+            return {
+                from: { kind: 'waste' }, count: 1,
+                to: { kind: 'foundation', suit: SUITS[Math.floor(wasteTop() / 13)] }, text,
+            };
+        case 'w2t':
+            return { from: { kind: 'waste' }, count: 1, to: { kind: 'tableau', index: mv.to }, text };
+        case 't2f':
+            return {
+                from: { kind: 'tableau', index: mv.from }, count: 1,
+                to: { kind: 'foundation', suit: SUITS[Math.floor(tabTop(mv.from) / 13)] }, text,
+            };
+        case 't2t':
+            return {
+                from: { kind: 'tableau', index: mv.from }, count: mv.count,
+                to: { kind: 'tableau', index: mv.to }, text,
+            };
+        case 'f2t':
+            return {
+                from: { kind: 'foundation', suit: mv.suit }, count: 1,
+                to: { kind: 'tableau', index: mv.to }, text,
+            };
+        default:
+            return null;
+    }
+}
+/** 统一呈现一条高亮提示：文字 toast + 来源/目标青色描边。 */
+function showHintObject(h) {
+    clearHint();
+    toast(h.text, 2600);
+    const srcHost = h.from.kind === 'stock' ? $('#stock')
+        : h.from.kind === 'tableau' ? tableauEl().children[h.from.index]
+            : h.from.kind === 'foundation' ? $('#found' + h.from.suit)
+                : h.from.kind === 'waste' ? $('#waste') : null;
+    if (srcHost)
+        srcHost.classList.add('hint-src');
+    const dstHost = h.to.kind === 'stock' ? $('#stock')
+        : h.to.kind === 'tableau' ? tableauEl().children[h.to.index]
+            : h.to.kind === 'foundation' ? $('#found' + h.to.suit)
+                : h.to.kind === 'waste' ? $('#waste') : null;
+    if (dstHost && !sameLocation(h.from, h.to))
+        dstHost.classList.add('hint-dst');
+    hintTimer = setTimeout(clearHint, 2800);
+}
 function showHint() {
     if (engine.phase === 'won')
         return;
-    clearHint();
-    const h = engine.hint();
+    // 优先使用求解器的有限前瞻建议，而不是只看一层的 engine.hint()。
+    // 求解器仍可能返回 unknown，但 recommendation 始终是合法且当前评分最高的一步。
+    const st = Solver.fromEngine(engine);
+    const sug = Solver.recommend(st, engine.passCount, { depth: 4, width: 40, nodeLimit: 4000 });
+    const h = sug ? hintFromSuggestion(st, sug) : engine.hint();
     if (!h) {
         toast('暂时没有可走的牌了，可以撤销或重新发牌', 1800);
         return;
     }
-    if (h.from.kind === 'stock') {
-        toast(h.text, 1600);
-        return;
-    }
-    toast(h.text, 2200);
-    const srcHost = h.from.kind === 'tableau' ? tableauEl().children[h.from.index]
-        : h.from.kind === 'foundation' ? $('#found' + h.from.suit)
-            : h.from.kind === 'waste' ? $('#waste') : null;
-    if (srcHost)
-        srcHost.classList.add('hint-src');
-    const dstHost = h.to.kind === 'tableau' ? tableauEl().children[h.to.index]
-        : h.to.kind === 'foundation' ? $('#found' + h.to.suit)
-            : h.to.kind === 'waste' ? $('#waste') : null;
-    if (dstHost)
-        dstHost.classList.add('hint-dst');
-    hintTimer = setTimeout(clearHint, 2400);
+    // 把「为什么推荐」也放进提示，避免只看到移动文案却不知道价值。
+    if (sug)
+        h.text += '（' + sug.reason + '）';
+    showHintObject(h);
 }
 /* ---- 自动完成 ---- */
 function checkAutoFinishPrompt() {
@@ -737,6 +786,7 @@ function autoFinish() {
         return;
     }
     stopAutoFinish();
+    clearPanel();
     clearTransient();
     const generation = gameGeneration;
     let guard = 0;
@@ -1022,7 +1072,12 @@ function showPanel(title, subtitle, reasons, buttons) {
         const b = document.createElement('button');
         b.className = 'btn';
         b.textContent = label;
-        b.addEventListener('click', () => { clearPanel(); fn(); });
+        b.addEventListener('click', () => {
+            // 高亮类按钮只做视觉提示，保留结论面板；其它操作（撤销/重发/关闭）才收起面板。
+            if (!label.includes('高亮'))
+                clearPanel();
+            fn();
+        });
         row.appendChild(b);
     }
     panel.appendChild(row);
@@ -1044,8 +1099,8 @@ function checkDeath() {
 }
 /** 底栏按钮 / 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态。
     求解是同步 CPU 密集任务，直接跑会卡死界面（拖牌、按钮全部无响应）。
-    所以先把「正在分析」画出来（requestAnimationFrame 等一帧），再分两阶段跑：
-    先 quick（几毫秒，能秒杀死局），再完整搜索（受 node/time 上限约束）。 */
+    所以先把「正在分析」画出来（requestAnimationFrame 等一帧），再跑完整搜索；
+    若完整搜索没能证明输赢，求解器仍会用有限前瞻给出一条可执行建议。 */
 function analyzeNow() {
     if (engine.phase === 'won') {
         toast('这局已经赢了。', 1500);
@@ -1062,15 +1117,19 @@ function analyzeNow() {
             return;
         const head = rep.verdict === 'win' ? '这局还能赢'
             : rep.verdict === 'dead' ? '这局已经死局'
-                : '暂时无法确定';
-        const sub = rep.verdict === 'win' ? '按提示走就能收完，继续吧。'
+                : '暂时无法确定输赢';
+        const suggestion = rep.suggestion;
+        const suggestedHint = suggestion ? hintFromSuggestion(st, suggestion) : null;
+        const suggestionText = suggestion ? ' 建议先走：' + suggestion.text + '。' : '';
+        const sub = rep.verdict === 'win' ? '求解器已找到完整胜利路线。'
             : rep.verdict === 'dead' ? '无论怎么走都赢不了了。建议撤销几步，或重新发牌。'
-                : '牌局太复杂，在限定时间内没搜出结论；不代表赢不了，也不代表一定输。';
-        showPanel(head, sub + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms）', rep.reasons, [
-            ['提示', () => showHint()],
-            ['重新发牌', () => restart()],
-            ['关闭', () => { }],
-        ]);
+                : '完整搜索没有在限定时间内结束，但下面给出了可执行的有限前瞻建议。';
+        const buttons = [];
+        if (suggestedHint) {
+            buttons.push([rep.verdict === 'win' ? '高亮必胜第一步' : '高亮建议', () => showHintObject(suggestedHint)]);
+        }
+        buttons.push(['重新发牌', () => restart()], ['关闭', () => { }]);
+        showPanel(head, sub + suggestionText + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms）', rep.reasons, buttons);
     };
     const heavy = () => {
         if (generation !== gameGeneration)

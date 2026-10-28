@@ -416,8 +416,17 @@ section('U6 撤销 / 提示 / 自动完成按钮接线', () => {
   btnHint.fire('click', {});
   ok(true, '提示按钮不抛异常');
 
+  // 建议落在牌库时也必须高亮牌库，而不是只闪一条容易错过的文字
+  U.setEngine(SOL.Solitaire.planted({
+    stock: [['H', 5]],
+    tableau: [[['S', 7]], [], [], [], [], [], []],
+  }));
+  btnHint.fire('click', {});
+  ok(stockEl.classList.contains('hint-src'), '牌库提示高亮牌库');
+  ok(toastEl.textContent.includes('翻开牌库'), '牌库提示带可读文字');
+
   btnAuto.fire('click', {});
-  ok(e.phase !== 'won', '开局时自动完成不会误触发');
+  ok(U.engine().phase !== 'won', '开局时自动完成不会误触发');
 });
 
 section('U7 菜单：抽牌模式与勾选状态', () => {
@@ -610,7 +619,31 @@ section('U17 「分析局面」给出结论与原因', () => {
   ok(!!h && h.textContent.includes('还能赢'), '可胜局面判为「还能赢」（实际：' + (h ? h.textContent : '') + '）');
   ok(panels[0].querySelectorAll('li').length > 0, '附带原因说明');
   ok(panels[0].querySelectorAll('.btn').length >= 2, '带操作按钮');
+  const winSub = panels[0].querySelector('.sub')?.textContent ?? '';
+  ok(winSub.includes('建议先走'), '可胜面板直接给出建议第一步');
+  const winBtns = panels[0].querySelectorAll('.btn');
+  const highlightBtn = winBtns.find((b: any) => b.textContent.includes('高亮必胜第一步'));
+  ok(!!highlightBtn, '可胜面板提供「高亮必胜第一步」按钮');
+  if (highlightBtn) {
+    highlightBtn.fire('click', {});
+    ok(tableauEl.children[0].classList.contains('hint-src'), '高亮第一步标出来源牌堆');
+    ok(foundEls.S.classList.contains('hint-dst'), '高亮第一步标出目标收牌区');
+    ok(tableEl.querySelectorAll('.info-banner').length === 1, '高亮建议后面板保留，便于继续看原因');
+  }
 
+  // 完整搜索没结论时，也不能只显示「太复杂」：必须给建议 + 高亮入口
+  U.setEngine(new SOL.Solitaire(lcg(77), () => 0, 1));
+  U.clearPanel();
+  pendingTimers.clear();
+  U.analyzeNow();
+  drainAnalysis();
+  const pu = tableEl.querySelectorAll('.info-banner');
+  const uh = pu[0]?.querySelector('h3')?.textContent ?? '';
+  const usub = pu[0]?.querySelector('.sub')?.textContent ?? '';
+  ok(pu.length === 1 && uh.includes('暂时无法确定输赢'), '搜索未完成时明确标注未证明（实际：' + uh + '）');
+  ok(usub.includes('建议先走'), '搜索未完成时仍直接给出建议第一步');
+  ok(pu[0]?.querySelectorAll('.btn').some((b: any) => b.textContent.includes('高亮建议')) === true,
+    '搜索未完成时提供「高亮建议」按钮');
   // 死局的分析结果
   U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
   U.clearPanel();
