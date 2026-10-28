@@ -797,7 +797,8 @@ function newGame(pass?: PassCount, rand?: () => number, clock?: () => number): v
   if (pass !== undefined) passCount = pass;
   autoPromptShown = false;
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
-  for (const n of $$('.win-banner, .bouncing')) n.remove?.();
+  clearWinArtifacts();
+
   engine = new ENGINE(rand ?? Math.random, clock, passCount);
   invalidateRenderCache();
   clearTransient();
@@ -810,7 +811,8 @@ function restart(): void {
   clearPanel();
   autoPromptShown = false;
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
-  for (const n of $$('.win-banner, .bouncing')) n.remove?.();
+  clearWinArtifacts();
+
   engine.restart(passCount);
   invalidateRenderCache();
   clearTransient();
@@ -822,7 +824,8 @@ function undo(): void {
   stopAutoFinish();
   clearPanel();
   if (!engine.undo()) { toast('没有可撤销的操作', 1200); return; }
-  for (const n of $$('.win-banner, .bouncing')) n.remove?.();
+  clearWinArtifacts();
+
   if (winTimer) { clearTimeout(winTimer); winTimer = null; }
   clearTransient();
   invalidateRenderCache();   // 撤销会回退到任意旧牌面，签名缓存不可信
@@ -854,43 +857,93 @@ function winSequence(): void {
   layer.style.position = 'absolute';
   table.appendChild(layer);
 
-  // 从收牌区顶端逐张弹出
+  const tRect = table.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+  const W = table.clientWidth || (w * 7 + 64);
+  const H = table.clientHeight || 440;
+  const raf = typeof requestAnimationFrame === 'function'
+    ? (fn: () => void): any => requestAnimationFrame(fn)
+    : (fn: () => void): any => setTimeout(fn, 16);
+
+  // 每门花色是一列火车：K 在最前面，Q/J/.../A 沿着 K 走过的轨迹排队跟随。
   for (const s of SUITS) {
     const host = $('#found' + s);
-    const card = host?.querySelector('.card');
-    if (!card) continue;
-    const rect = card.getBoundingClientRect?.() ?? { left: 0, top: 0, width: w, height: h };
-    const tRect = table.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+    const stack = engine.cardsAt({ kind: 'foundation', suit: s });
+    if (!stack.length) continue;
+    const visible = host?.querySelector('.card');
+    const rect = visible?.getBoundingClientRect?.() ?? host?.getBoundingClientRect?.() ?? { left: 0, top: 0, width: w, height: h };
     const x0 = rect.left - tRect.left, y0 = rect.top - tRect.top;
-    // 克隆一份用于弹跳，避免动到真实牌
-    const c = card.cloneNode ? card.cloneNode(true) : cardEl({ suit: s, rank: 13, faceUp: true });
-    c.style.position = 'absolute';
-    c.style.left = x0 + 'px';
-    c.style.top = y0 + 'px';
-    c.style.margin = '0';
-    layer.appendChild(c);
+
+    // 收牌区本身也是 13 张叠在一起，但 DOM 只显示最上面的 K。
+    // 这里按 K → A 建出整串牌，隐藏真实顶牌，避免出现两个 K。
+    const ordered = stack.slice().reverse();
+    const train = document.createElement('div');
+    train.className = 'win-train';
+    train.dataset.suit = s;
+    const cardEls: any[] = [];
+    for (let i = 0; i < ordered.length; i++) {
+      const c = cardEl(ordered[i]);
+      c.classList.add('win-train-card');
+      c.dataset.suit = s;
+      c.dataset.rank = String(ordered[i].rank);
+      c.style.position = 'absolute';
+      c.style.left = x0 + 'px';
+      c.style.top = y0 + 'px';
+      c.style.margin = '0';
+      // K 在最上层，后面的牌依次被前一张压住，形成连贯牌串。
+      c.style.zIndex = String(30 - i);
+      train.appendChild(c);
+      cardEls.push(c);
+    }
+    layer.appendChild(train);
+    host?.classList.add('win-cleared');
+
     const dir = s === 'S' || s === 'H' ? -1 : 1;
-    const vx = dir * (2.2 + Math.random() * 1.6);
-    let vy = -(1.5 + Math.random() * 1.2);
+    let vx = dir * Math.max(3.2, w * 0.035);
+    let vy = -(Math.max(5.2, h * 0.04) + Math.random() * 1.2);
     let x = x0, y = y0;
     let alive = true;
-    const W = table.clientWidth || (w * 7 + 64), H = table.clientHeight || 440;
+    let frames = 0;
+    const spacing = Math.max(18, w * 0.22);
+    const frameGap = Math.max(3, Math.round(spacing / Math.max(2.4, Math.abs(vx))));
+    const maxHistory = frameGap * Math.max(1, cardEls.length - 1) + 2;
+    // 先填满起点，起跑第一帧时后面的牌仍留在收牌区，随后逐张被拉出。
+    const path: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < maxHistory; i++) path.push({ x: x0, y: y0 });
+    const place = (el: any, px: number, py: number): void => {
+      el.style.transform = 'translate(' + Math.round(px - x0) + 'px,' + Math.round(py - y0) + 'px)';
+    };
+
     const tick = (): void => {
       if (!alive || generation !== gameGeneration || engine.phase !== 'won') return;
-      vy += 0.35;
+      frames++;
+      vy += 0.34;
       x += vx; y += vy;
-      if (x < 0) { x = 0; }
-      if (x + w > W) { x = W - w; }
-      if (y + h > H) { y = H - h; vy = -Math.abs(vy) * 0.78; if (Math.abs(vy) < 1.2) alive = false; }
-      c.style.transform = 'translate(' + Math.round(x - x0) + 'px,' + Math.round(y - y0) + 'px)';
-      if (alive) requestAnimationFrame(tick);
-      else c.remove?.();
-    };
-    setTimeout(() => {
-      if (generation === gameGeneration && engine.phase === 'won' && typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(tick);
+      if (x < 0) { x = 0; vx = Math.abs(vx) * 0.94; }
+      else if (x + w > W) { x = Math.max(0, W - w); vx = -Math.abs(vx) * 0.94; }
+      if (y < 0) { y = 0; vy = Math.abs(vy) * 0.65; }
+      if (y + h > H) {
+        y = H - h;
+        vy = -Math.abs(vy) * 0.76;
+        vx *= 0.985;
+        if (Math.abs(vy) < 1.4 && Math.abs(vx) < 2.2) alive = false;
       }
-    }, Math.random() * 400);
+      if (frames > 260) alive = false;
+
+      path.push({ x, y });
+      if (path.length > maxHistory) path.shift();
+      place(cardEls[0], x, y);
+      for (let i = 1; i < cardEls.length; i++) {
+        const at = Math.max(0, path.length - 1 - i * frameGap);
+        const p = path[at];
+        place(cardEls[i], p.x, p.y);
+      }
+      if (alive) raf(tick);
+    };
+
+    const suitIndex = SUITS.indexOf(s);
+    setTimeout(() => {
+      if (generation === gameGeneration && engine.phase === 'won') raf(tick);
+    }, suitIndex * 80 + Math.random() * 120);
   }
 
   winTimer = setTimeout(() => {
@@ -904,9 +957,14 @@ function winSequence(): void {
     btn.addEventListener('click', () => newGame());
     banner.appendChild(btn);
     table.appendChild(banner);
-  }, 2600);
+  }, 3400);
 }
 
+/** 清掉胜利动画留下的临时节点与收牌区隐藏状态。 */
+function clearWinArtifacts(): void {
+  for (const n of $$('.win-banner, .bouncing, .win-train')) n.remove?.();
+  for (const s of SUITS) $('#found' + s)?.classList.remove('win-cleared');
+}
 /* ---- Toast ---- */
 
 function toast(text: string, ms = 1600): void {
@@ -1256,7 +1314,7 @@ init();
 /* 测试钩子：uitest 以最小 DOM stub 执行本文件后，借它驱动流程（生产环境无害） */
 (globalThis as any).__sui = {
   newGame, restart, undo, doDraw, showHint, autoFinish,
-  analyzeNow, checkDeath, clearPanel, showPanel,
+  analyzeNow, checkDeath, clearPanel, showPanel, winSequence,
   setEngine(e: SolitaireInstance) { engine = e; autoPromptShown = false; invalidateRenderCache(); render(); },
   engine: (): SolitaireInstance => engine,
   render,

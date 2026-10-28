@@ -243,8 +243,9 @@ const documentStub = {
                 out.push(...n.querySelectorAll(sel));
             return out;
         }
-        if (sel === '.win-banner, .bouncing')
-            return [];
+        if (sel === '.win-banner, .bouncing' || sel === '.win-banner, .bouncing, .win-train') {
+            return tableEl.querySelectorAll(sel);
+        }
         return [];
     },
     addEventListener: (type, fn) => { (docListeners[type] ?? (docListeners[type] = [])).push(fn); },
@@ -779,6 +780,46 @@ section('U22 标题栏只保留最小化/最大化（网页版没有假关闭）
     ok(!winBox.classList.contains('minimized'), '点标题栏可展开回来（否则就没入口了）');
     winBox.classList.remove('maximized', 'minimized');
     U.newGame();
+});
+section('U23 胜利动画：每门花色都是 K 领头的 13 张牌串', () => {
+    const fill = (suit, n = 13) => Array.from({ length: n }, (_, i) => [suit, i + 1]);
+    const e = SOL.Solitaire.planted({
+        foundations: { S: fill('S', 12), H: fill('H'), D: fill('D'), C: fill('C') },
+        tableau: [[['S', 13]], [], [], [], [], [], []],
+    });
+    const oldRaf = globalAny.requestAnimationFrame;
+    const queued = [];
+    globalAny.requestAnimationFrame = (fn) => { queued.push(fn); return queued.length; };
+    try {
+        U.setEngine(e);
+        pendingTimers.clear();
+        ok(U.tryMove({ loc: { kind: 'tableau', index: 0 }, count: 1 }, { kind: 'foundation', suit: 'S' }) === true, '前提：打出最后一张 K 触发胜利');
+        ok(e.phase === 'won', '引擎进入胜利状态');
+        const trains = tableEl.querySelectorAll('.win-train');
+        ok(trains.length === 4, '胜利后生成四条花色牌串（实际 ' + trains.length + ' 条）');
+        ok(trains.every((t) => t.querySelectorAll('.card').length === 13), '每条牌串都包含完整的 13 张牌，而不是只有 K');
+        ok(trains.every((t) => t.querySelectorAll('.card')[0]?.dataset.rank === '13'), '每条牌串最前面都是 K');
+        ok(foundEls.S.classList.contains('win-cleared'), '真实收牌区顶牌被隐藏，避免出现两个 K');
+        // 启动四条牌串，再手动推 12 帧，验证后面的牌真的沿着 K 的轨迹拉开。
+        for (let i = 0; i < 4; i++)
+            runNextTimer();
+        for (let frame = 0; frame < 12; frame++) {
+            const batch = queued.splice(0, queued.length);
+            for (const fn of batch)
+                fn();
+        }
+        const head = trains[0]?.querySelectorAll('.card')[0];
+        const follower = trains[0]?.querySelectorAll('.card')[1];
+        ok(!!head?.style.transform, 'K 已经开始移动');
+        ok(!!follower?.style.transform && follower.style.transform !== head.style.transform, '第二张牌已经跟在 K 后面，形成牌串而不是单张弹跳');
+        pendingTimers.clear();
+        U.newGame();
+        ok(tableEl.querySelectorAll('.win-train').length === 0, '开新局后牌串动画节点被清理');
+    }
+    finally {
+        globalAny.requestAnimationFrame = oldRaf;
+        pendingTimers.clear();
+    }
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);

@@ -670,6 +670,10 @@ body {
 
 .bouncing { position: absolute; z-index: 65; pointer-events: none; }
 .bouncing .card { box-shadow: 0 3px 8px rgba(0, 0, 0, .38), 0 0 0 1px rgba(16, 22, 32, .32); }
+/* 胜利动画把整门花色做成一条牌串：K 领头，Q/J/.../A 沿轨迹跟随 */
+.win-train { position: absolute; inset: 0; pointer-events: none; }
+.win-train-card { will-change: transform; }
+.slot.foundation.win-cleared .card { opacity: 0; }
 
 /* ================================ 规则说明 ================================ */
 
