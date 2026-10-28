@@ -10,7 +10,7 @@
 
    实现说明：
    - 状态用紧凑数组表示，走法生成独立于 engine（便于剪枝与转移表）
-   - 正确性靠与 engine 的对拍测试保证（见 test.ts 的「求解器与引擎规则一致」段）
+   - 正确性靠与 engine 的走法及完整后继状态对拍保证（见 test.ts 的第 14 段）
    - 搜索是带转移表的 DFS，设节点/时间上限，超限返回 unknown 而不是瞎猜
    - 判定「死局」有两种确定性来源：
        a) 没有任何合法移动（含翻牌）→ 一定是死局
@@ -129,17 +129,23 @@
         }
         return false;
     }
-    /** 回收后能不能翻出一张「真的能走」的牌。
-        draw-1：回收后首张是废牌堆底（之前埋在下面），要单独检查它能不能动；
-        draw-3：分组固定、重翻顺序与上轮相同，回收永远只是原地打转。
-        注意：引擎的 draw() 回收时只回收不翻牌，所以这里要模拟「回收 + 再翻一次」。 */
+    /** 回收后的完整一轮里，是否会出现任何非翻牌走法。
+        不能只看回收后的第一张：第一张不能走时，玩家仍可继续翻后面的牌；
+        draw-3 也不能一律忽略，因为当前废牌堆可能来自已经抽走过牌的上一轮，
+        回收后某一组的顶牌同样可能变成可行动的牌。
+        这里只模拟 draw，不执行其它走法；一旦发现合法走法即可保守地判定「未死」。
+        若整轮都没有非翻牌走法，继续回收只会重复同一状态环。 */
     function recycleUnlocks(st, pass) {
-        if (pass !== 1 || st.waste.length <= 1)
+        if (st.stock.length !== 0 || st.waste.length <= 1)
             return false;
-        const afterRecycle = applyMove(st, { kind: 'draw' }, pass); // 此时 stock 已有牌、waste 为空
-        const afterDraw = applyMove(afterRecycle, { kind: 'draw' }, pass);
-        const first = afterDraw.waste[afterDraw.waste.length - 1];
-        return first !== undefined && canGoAnywhere(afterDraw, first);
+        let cur = applyMove(st, { kind: 'draw' }, pass); // 引擎语义：先只回收，不顺便翻牌
+        const drawCount = Math.ceil(st.waste.length / pass);
+        for (let i = 0; i < drawCount; i++) {
+            cur = applyMove(cur, { kind: 'draw' }, pass);
+            if (moves(cur, pass).some((mv) => mv.kind !== 'draw'))
+                return true;
+        }
+        return false;
     }
     function cloneState(st) {
         return {
@@ -180,6 +186,9 @@
             case 't2f': {
                 const card = s.tab[mv.from].pop();
                 s.up[mv.from].pop();
+                // 与 engine.move() 一致：收走顶牌后，源列露出的暗牌要立即翻开。
+                if (s.up[mv.from].length)
+                    s.up[mv.from][s.up[mv.from].length - 1] = true;
                 s.found[suitIdx(card)]++;
                 break;
             }

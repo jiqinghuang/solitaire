@@ -358,6 +358,29 @@ function mvKey(m) {
         default: return '?';
     }
 }
+/** 把求解器走法应用到真实引擎；返回 false 表示求解器给出了引擎拒绝的走法。 */
+function applySolverMoveToEngine(e, mv) {
+    switch (mv.kind) {
+        case 'draw': {
+            if (e.stockCount === 0 && e.wasteCount === 0)
+                return false;
+            const r = e.draw();
+            return r.drawn > 0 || r.recycled;
+        }
+        case 'w2f': {
+            const card = e.topCard(WASTE);
+            return card !== null && e.move(WASTE, 1, FOUND(card.suit)).ok;
+        }
+        case 'w2t': return e.move(WASTE, 1, COL(mv.to)).ok;
+        case 't2f': {
+            const card = e.topCard(COL(mv.from));
+            return card !== null && e.move(COL(mv.from), 1, FOUND(card.suit)).ok;
+        }
+        case 't2t': return e.move(COL(mv.from), mv.count, COL(mv.to)).ok;
+        case 'f2t': return e.move(FOUND(mv.suit), 1, COL(mv.to)).ok;
+        default: return false;
+    }
+}
 section('13 canAutoFinish 真的能收完才算数', () => {
     // 回归：以前只看「空库 + 全明」，导致真死局里按钮也亮着
     const dead = EngineCtor.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] });
@@ -375,8 +398,9 @@ section('13 canAutoFinish 真的能收完才算数', () => {
     });
     ok(ready.canAutoFinish() === true, '真的收得完时才返回 true');
 });
-section('14 求解器与引擎的走法生成必须一致（对拍）', () => {
+section('14 求解器与引擎的走法及状态转移必须一致（对拍）', () => {
     let mismatch = 0, checked = 0;
+    let transitionMismatch = 0, rejected = 0, transitions = 0;
     for (let seed = 1; seed <= 60; seed++) {
         const e = new EngineCtor(lcg(seed), () => 0, (seed % 2 ? 1 : 3));
         for (let step = 0; step < 12; step++) {
@@ -421,27 +445,35 @@ section('14 求解器与引擎的走法生成必须一致（对拍）', () => {
                     console.log('      求解器:' + [...solverSet].sort().join(' '));
                 }
             }
-            // 推进一步，继续对拍
+            // 随机挑一条走法，同时应用到引擎和求解器；除走法集合外，完整后继状态也必须一致。
             const all = V.moves(st, e.passCount);
             const pick = all[Math.floor(lcg(seed * 100 + step)() * all.length)];
             if (pick) {
-                if (pick.kind === 'draw')
-                    e.draw();
-                else if (pick.kind === 'w2f')
-                    e.move({ kind: 'waste' }, 1, FOUND('S'));
-                else if (pick.kind === 'w2t')
-                    e.move({ kind: 'waste' }, 1, COL(pick.to));
-                else if (pick.kind === 't2f')
-                    e.move(COL(pick.from), 1, FOUND(e.cardsAt(COL(pick.from)).slice(-1)[0].suit));
-                else if (pick.kind === 't2t')
-                    e.move(COL(pick.from), pick.count, COL(pick.to));
-                else if (pick.kind === 'f2t')
-                    e.move(FOUND(pick.suit), 1, COL(pick.to));
+                transitions++;
+                const solverNext = V.applyMove(st, pick, e.passCount);
+                if (!applySolverMoveToEngine(e, pick)) {
+                    rejected++;
+                    if (rejected <= 2)
+                        console.log('    引擎拒绝走法 seed=' + seed + ' step=' + step + ' move=' + mvKey(pick));
+                }
+                else {
+                    const engineKey = V.stateKey(V.fromEngine(e));
+                    const solverKey = V.stateKey(solverNext);
+                    if (engineKey !== solverKey) {
+                        transitionMismatch++;
+                        if (transitionMismatch <= 2) {
+                            console.log('    后继状态差异 seed=' + seed + ' step=' + step + ' move=' + mvKey(pick));
+                        }
+                    }
+                }
             }
         }
     }
     ok(checked > 0, '跑完了 ' + checked + ' 个状态的对拍');
     ok(mismatch === 0, '求解器与引擎的合法走法完全一致（0 处差异）');
+    ok(transitions > 0, '实际执行了 ' + transitions + ' 个状态转移对拍');
+    ok(rejected === 0, '求解器走法都能被真实引擎执行（0 次拒绝）');
+    ok(transitionMismatch === 0, '执行后牌库/废牌堆/收牌区/牌阵及明暗状态完全一致');
 });
 section('15 求解器判定', () => {
     const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);
@@ -496,7 +528,7 @@ section('16 死局原因诊断', () => {
     ok(reasons.some((r) => r.includes('红桃J') || r.includes('方块J')), '说清楚了它在等哪张牌');
     ok(reasons.some((r) => r.includes('还需要 黑桃9') || r.includes('还需要 红桃9')), '说清楚了收牌卡在第几步');
 });
-section('17 quick 死局判定不能冤枉活局（回归：draw-1 回收会翻出新牌）', () => {
+section('17 quick 死局判定不能冤枉活局（两种抽牌模式的完整回收）', () => {
     // 牌阵 [♥3]；废牌堆（底→顶）[♣2, ♠Q, ♥Q, ♠Q]，顶牌 ♠Q 无处可去。
     // 旧版 hasAnyMove 把「回收」一律当原地打转 → 误报 dead；
     // 但 draw-1 回收后整叠掉头，第一张翻出的是 ♣2，可以压到 ♥3 上。
@@ -505,12 +537,12 @@ section('17 quick 死局判定不能冤枉活局（回归：draw-1 回收会翻�
         tableau: [[['H', 3]]],
     }, () => 0, 1);
     ok(V.analyze(V.fromEngine(live), 1, { quick: true }).verdict !== 'dead', 'draw-1 下回收能翻出新牌时，quick 不得判死局（回归）');
-    // 同样的牌局在 draw-3 下回收分组不变，重翻顺序与上轮相同 → 确实是死局
+    // 这组牌在 draw-3 下完整回收一轮，每个能成为顶牌的牌都无处可去 → 确实是死局
     const dead3 = EngineCtor.planted({
         waste: [['C', 2], ['S', 12], ['H', 12], ['S', 12]],
         tableau: [[['H', 3]]],
     }, () => 0, 3);
-    ok(V.analyze(V.fromEngine(dead3), 3, { quick: true }).verdict === 'dead', 'draw-3 下回收只是原地打转，仍判死局');
+    ok(V.analyze(V.fromEngine(dead3), 3, { quick: true }).verdict === 'dead', 'draw-3 完整回收后仍无任何走法时，仍判死局');
     // 废牌堆只有一张时，回收后顶牌还是它自己 → 也是死局
     const single = EngineCtor.planted({ waste: [['S', 12]], tableau: [[['H', 3]]] }, () => 0, 1);
     ok(V.analyze(V.fromEngine(single), 1, { quick: true }).verdict === 'dead', 'draw-1 但废牌堆只剩一张时，回收后顶牌不变 → 死局');
@@ -521,6 +553,28 @@ section('17 quick 死局判定不能冤枉活局（回归：draw-1 回收会翻�
         tableau: [[['H', 3]]],
     }, () => 0, 1);
     ok(V.analyze(V.fromEngine(stuck), 1, { quick: true }).verdict === 'dead', '回收后新顶牌也无处可去时仍判死局');
+    // 回归：回收后的第一张不能走，不代表后面的牌也不能走。
+    // draw-1 废牌堆（底→顶）[♣5, ♣2, ♠Q]：先翻出 ♣5 无处可去，再翻 ♣2 才能压到 ♥3。
+    const buried1 = EngineCtor.planted({
+        waste: [['C', 5], ['C', 2], ['S', 12]],
+        tableau: [[['H', 3]]],
+    }, () => 0, 1);
+    ok(V.analyze(V.fromEngine(buried1), 1, { quick: true }).verdict !== 'dead', 'draw-1 回收后第二张才可行动时，quick 不得判死局（回归）');
+    buried1.draw(); // 回收
+    buried1.draw(); // ♣5
+    buried1.draw(); // ♣2
+    ok(buried1.move(WASTE, 1, COL(0)).ok, 'draw-1 按真实引擎回收并翻两次后，♣2 确实可以移动');
+    // 回归：draw-3 也不能直接忽略回收。四张废牌回收后，第一组的顶牌是 ♣2。
+    const buried3 = EngineCtor.planted({
+        waste: [['S', 5], ['H', 4], ['C', 2], ['S', 12]],
+        tableau: [[['H', 3]]],
+    }, () => 0, 3);
+    ok(V.analyze(V.fromEngine(buried3), 3, { quick: true }).verdict !== 'dead', 'draw-3 回收后某一组顶牌可行动时，quick 不得判死局（回归）');
+    const recycleHint = V.recommend(V.fromEngine(buried3), 3);
+    ok(recycleHint?.move?.kind === 'draw', '回收能解锁后续走法时，有限前瞻会建议回收而不是放弃');
+    buried3.draw(); // 回收
+    buried3.draw(); // 一组三张，顶牌 ♣2
+    ok(buried3.move(WASTE, 1, COL(0)).ok, 'draw-3 按真实引擎回收并翻一组后，♣2 确实可以移动');
     // 引擎的 peekDraw 视图与实际 draw() 必须一致（draw 回收时只回收不翻牌）
     const pk = EngineCtor.planted({
         waste: [['C', 2], ['S', 12], ['H', 12], ['S', 12]],
@@ -566,15 +620,43 @@ section('19 winningLine 必须真的给出一条能赢的路线', () => {
     ok(Array.isArray(rep.winningLine) && rep.winningLine.length > 0, 'win 时给出 winningLine（回归：以前永远是 undefined）');
     ok(rep.reasons.some((r) => r.includes('必胜第一步')), '原因里带上了第一步的说明');
     ok(!!rep.suggestion && Array.isArray(rep.suggestion.winningPath) && rep.suggestion.winningPath.length > 0, 'win 时 suggestion 也带可执行路线');
-    // 把 winningLine 逐步应用到状态上，必须真的能走到 52 张收完
+    // winningLine 必须同时通过求解器状态与真实引擎验证，避免用同一个错误模型自证正确。
     let cur = st;
     let steps = 0;
+    let engineOK = true;
     for (const mv of rep.winningLine ?? []) {
         cur = V.applyMove(cur, mv, 1);
+        if (!applySolverMoveToEngine(win, mv))
+            engineOK = false;
         steps++;
     }
     const total = cur.found.reduce((a, b) => a + b, 0);
-    ok(total === 52, '按 winningLine 走到底确实收满 52 张（走了 ' + steps + ' 步）');
+    ok(total === 52 && engineOK && win.phase === 'won', '按 winningLine 走到底，求解器收满 52 张且真实引擎也获胜（走了 ' + steps + ' 步）');
+    // 回归：t2f 收走 ♠Q 后必须翻开下面的 ♠K，否则这个只需两步的胜利会被漏报。
+    const flipWin = EngineCtor.planted({
+        foundations: {
+            S: Array.from({ length: 11 }, (_, i) => ['S', i + 1]),
+            H: Array.from({ length: 13 }, (_, i) => ['H', i + 1]),
+            D: Array.from({ length: 13 }, (_, i) => ['D', i + 1]),
+            C: Array.from({ length: 13 }, (_, i) => ['C', i + 1]),
+        },
+        tableau: [[['S', 13, false], ['S', 12, true]], [], [], [], [], [], []],
+    }, () => 0, 1);
+    const flipState = V.fromEngine(flipWin);
+    const flipReport = V.analyze(flipState, 1, { nodeLimit: 60000, timeLimit: 700 });
+    ok(flipReport.verdict === 'win', 't2f 自动翻牌后，两步可胜局面必须判为 win（回归）');
+    let flipEngineOK = true;
+    let flipStateOK = true;
+    let flipSolverState = flipState;
+    for (const mv of flipReport.winningLine ?? []) {
+        flipSolverState = V.applyMove(flipSolverState, mv, 1);
+        if (!applySolverMoveToEngine(flipWin, mv))
+            flipEngineOK = false;
+        if (V.stateKey(flipSolverState) !== V.stateKey(V.fromEngine(flipWin)))
+            flipStateOK = false;
+    }
+    ok(flipEngineOK && flipWin.phase === 'won', '两步胜利路线在真实引擎中可执行并获胜');
+    ok(flipStateOK, '胜利路线每一步的明暗牌状态都与真实引擎一致');
 });
 section('20 有限前瞻建议：搜索不确定时仍给出合法可执行一步', () => {
     const e = new EngineCtor(lcg(2026), () => 0, 1);
