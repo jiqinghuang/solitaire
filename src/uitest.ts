@@ -168,18 +168,18 @@ for (const act of ['new', 'restart', 'draw1', 'draw3', 'undo', 'hint', 'autofini
   miEls[act] = mi;
 }
 
-/* 标题栏（三个 Win95 装饰按钮，现在有真实行为） */
+/* 标题栏（保留最大化/最小化两个有真实行为的按钮） */
 const winBox = byId('win'); winBox.className = 'win';
 const titlebarEl = byId('titlebar'); titlebarEl.className = 'titlebar';
 const tbtnMin = mkEl('span'); tbtnMin.className = 'tbtn tbtn-min';
 const tbtnMax = mkEl('span'); tbtnMax.className = 'tbtn tbtn-max';
-const tbtnClose = mkEl('span'); tbtnClose.className = 'tbtn tbtn-close';
-titlebarEl.appendChild(tbtnMin); titlebarEl.appendChild(tbtnMax); titlebarEl.appendChild(tbtnClose);
+titlebarEl.appendChild(tbtnMin); titlebarEl.appendChild(tbtnMax);
 winBox.appendChild(titlebarEl);
 
 /* 按钮与 LED */
 const btnUndo = mkEl('button'); btnUndo._id = 'btnUndo';
 const btnHint = mkEl('button'); btnHint._id = 'btnHint';
+const btnAnalyze = mkEl('button'); btnAnalyze._id = 'btnAnalyze';
 const btnAuto = mkEl('button'); btnAuto._id = 'btnAuto';
 const ledScore = byId('ledScore');
 const ledTime = byId('ledTime');
@@ -189,9 +189,9 @@ const rootEls: Record<string, StubEl> = {
   '#dragLayer': dragLayerEl, '#toast': toastEl,
   '#win': winBox, '#titlebar': titlebarEl,
   '.win': winBox, '.titlebar': titlebarEl,
-  '.tbtn-min': tbtnMin, '.tbtn-max': tbtnMax, '.tbtn-close': tbtnClose,
+  '.tbtn-min': tbtnMin, '.tbtn-max': tbtnMax,
   '#foundS': foundEls.S, '#foundH': foundEls.H, '#foundD': foundEls.D, '#foundC': foundEls.C,
-  '#btnUndo': btnUndo, '#btnHint': btnHint, '#btnAuto': btnAuto,
+  '#btnUndo': btnUndo, '#btnHint': btnHint, '#btnAnalyze': btnAnalyze, '#btnAuto': btnAuto,
   '#ledScore': ledScore, '#ledTime': ledTime,
   '#menuGame': menuGame, '#menuHelp': menuHelp,
   '#menuGameDrop': gameDrop, '#menuHelpDrop': helpDrop,
@@ -209,7 +209,7 @@ const documentStub: any = {
   },
   querySelectorAll: (sel: string) => {
     if (sel === '.menutitle') return [gameTitle, helpTitle];
-    if (sel === '.tbtn') return [tbtnMin, tbtnMax, tbtnClose];
+    if (sel === '.tbtn') return [tbtnMin, tbtnMax];
     if (sel === '.card.selected') {
       const out: StubEl[] = [];
       for (const n of [tableauEl, wasteEl, ...Object.values(foundEls)]) out.push(...n.querySelectorAll('.selected'));
@@ -641,13 +641,20 @@ section('U17 「分析局面」给出结论与原因', () => {
   ok(tableEl.querySelectorAll('.info-banner').length === 0, '重新发牌后面板消失');
 });
 
-section('U18 A 键触发「分析局面」（回归：文档写了但没绑）', () => {
+section('U18 底栏按钮 / A 键触发「分析局面」', () => {
   U.setEngine(SOL.Solitaire.planted({ tableau: [[['S', 2], ['H', 7]], [['D', 8], ['C', 9]]] }));
   U.clearPanel();
   pendingTimers.clear();
   keydown('a');
   for (let i = 0; i < 8 && runNextTimer(); i++) { /* 推完异步分析 */ }
   ok(tableEl.querySelectorAll('.info-banner').length === 1, '按 A 弹出分析面板');
+
+  // 底栏主入口必须和快捷键走到同一个分析流程
+  U.clearPanel();
+  pendingTimers.clear();
+  btnAnalyze.fire('click', {});
+  for (let i = 0; i < 8 && runNextTimer(); i++) { /* 推完异步分析 */ }
+  ok(tableEl.querySelectorAll('.info-banner').length === 1, '底栏「分析局面」按钮弹出分析面板');
 
   // 菜单里也必须真有这一项
   const analyzeItem = gameDrop.querySelector('[data-act="analyze"]');
@@ -730,9 +737,9 @@ section('U21 渲染缓存在拖动与自动完成下不漏画（回归）', () =
   U.newGame();
 });
 
-section('U22 标题栏三个按钮真的有作用（回归：旧版只是画上去的）', () => {
+section('U22 标题栏只保留最小化/最大化（网页版没有假关闭）', () => {
   U.newGame();
-  winBox.classList.remove('maximized', 'minimized', 'closed');
+  winBox.classList.remove('maximized', 'minimized');
   U.syncTitleButtons();
 
   // 最大化：加 class、图标换成「还原」、再点一次还原
@@ -764,17 +771,7 @@ section('U22 标题栏三个按钮真的有作用（回归：旧版只是画上�
   titlebarEl.fire('click', { target: titlebarEl });
   ok(!winBox.classList.contains('minimized'), '点标题栏可展开回来（否则就没入口了）');
 
-  // 关闭：停牌 + 变灰
-  clickCard(stockEl);
-  const movesBefore = U.engine().moves;
-  ok(movesBefore > 0, '前提：先走一步');
-  tbtnClose.fire('click', {});
-  ok(winBox.classList.contains('closed'), '点关闭 → 加上 closed');
-  ok(toastEl.textContent.includes('新游戏'), '提示告诉玩家怎么重开');
-  // 关闭后牌局仍保留（不自动重开，避免误触丢进度）
-  ok(U.engine().moves === movesBefore, '关闭不会偷偷重开一局');
-
-  winBox.classList.remove('maximized', 'minimized', 'closed');
+  winBox.classList.remove('maximized', 'minimized');
   U.newGame();
 });
 

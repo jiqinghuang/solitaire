@@ -358,9 +358,11 @@ function renderStatus(): void {
 
 function syncButtons(): void {
   const hintBtn = $('#btnHint');
+  const analyzeBtn = $('#btnAnalyze');
   const autoBtn = $('#btnAuto');
   // 撤销在胜利后仍可用：按钮行为与引擎、菜单、快捷键保持一致。
   if (hintBtn) hintBtn.disabled = engine.phase === 'won';
+  if (analyzeBtn) analyzeBtn.disabled = engine.phase === 'won';
   if (autoBtn) autoBtn.disabled = !engine.canAutoFinish();
 }
 
@@ -913,7 +915,7 @@ function onMenuItem(act: string): void {
 /* ---- 死局检测与局面分析 ----
    两层：
    1. 每次走子后跑 quick 检查（只看还有没有得走），卡死就弹面板——这是玩家最常遇到的
-   2. 菜单「分析局面」跑真正的求解器，给出 可胜 / 死局 / 搜不出来 三态与原因 */
+   2. 底栏按钮 / 菜单「分析局面」跑真正的求解器，给出 可胜 / 死局 / 搜不出来 三态与原因 */
 
 function clearPanel(): void {
   // 面板总是挂在牌桌下；从牌桌内查找比全局选择器更稳（也不依赖 stub 的 document.querySelectorAll）
@@ -973,7 +975,7 @@ function checkDeath(): void {
   );
 }
 
-/** 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态。
+/** 底栏按钮 / 菜单「分析局面」：跑求解器，给出可胜 / 死局 / 搜不出来 三态。
     求解是同步 CPU 密集任务，直接跑会卡死界面（拖牌、按钮全部无响应）。
     所以先把「正在分析」画出来（requestAnimationFrame 等一帧），再分两阶段跑：
     先 quick（几毫秒，能秒杀死局），再完整搜索（受 node/time 上限约束）。 */
@@ -1028,9 +1030,9 @@ function showAbout(): void {
 
 /* ---- 事件绑定 ---- */
 
-/* ---- 标题栏按钮（Win95 三个装饰按钮，现在都接上真实行为） ----
-   旧版三个按钮只是画上去的 <span>，点了没任何反应。
-   这里做成：最大化=铺满视口；最小化=收起牌桌只留标题栏；关闭=停止计时并停牌。 */
+/* ---- 标题栏按钮 ----
+   网页版只保留两个真正有意义的窗口动作：最大化=铺满视口；最小化=收起牌桌只留标题栏。
+   浏览器标签页本身负责关闭，页面内不再画一个只能「假关闭」的叉号。 */
 
 function winEl(): any { return $('.win'); }
 
@@ -1067,22 +1069,10 @@ function toggleMinimize(): void {
   if (!on) { invalidateMetrics(); invalidateRenderCache(); render(); }
 }
 
-/** 关闭：停掉计时与自动完成，牌局保留（点菜单「新游戏」可重开） */
-function closeWindow(): void {
-  stopAutoFinish();
-  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
-  if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; }
-  const w = winEl();
-  if (w) w.classList.add('closed');
-  syncTitleButtons();
-  toast('已关闭：点「游戏 → 新游戏」重开一局', 3200);
-}
-
 /** 让按钮的图标/提示与当前状态一致 */
 function syncTitleButtons(): void {
   const maxBtn = $('.tbtn-max');
   const minBtn = $('.tbtn-min');
-  const closeBtn = $('.tbtn-close');
   const maxed = isMaximized();
   if (maxBtn) {
     maxBtn.title = maxed ? '还原（恢复窗口大小）' : '最大化（铺满屏幕）';
@@ -1092,7 +1082,6 @@ function syncTitleButtons(): void {
       : '<svg viewBox="0 0 8 7"><rect x="1.2" y="1.2" width="5.6" height="4.6" fill="none" stroke="#000"/></svg>';
   }
   if (minBtn) minBtn.title = isMinimized() ? '展开牌桌' : '最小化（收起牌桌）';
-  if (closeBtn) closeBtn.title = '关闭（停止计时，需点「新游戏」重开）';
 }
 
 function bindEvents(): void {
@@ -1104,10 +1093,9 @@ function bindEvents(): void {
   document.addEventListener('pointerup', onPointerUp);
   document.addEventListener('pointercancel', onPointerCancel);
 
-  // 标题栏三个按钮（Win95 装饰按钮，现在都有真实行为）
+  // 标题栏只保留对本页有意义的两个按钮；网页没有可安全模拟的「关闭窗口」语义。
   $('.tbtn-max')?.addEventListener('click', toggleMaximize);
   $('.tbtn-min')?.addEventListener('click', toggleMinimize);
-  $('.tbtn-close')?.addEventListener('click', closeWindow);
   // 最小化后点标题栏可以展开回来（否则牌桌藏起来就没入口了）
   $('.titlebar')?.addEventListener('click', (e: any) => {
     if (e.target?.closest?.('.tbtn')) return;   // 点按钮交给按钮自己处理
@@ -1144,6 +1132,7 @@ function bindEvents(): void {
   // 按钮
   $('#btnUndo')?.addEventListener('click', undo);
   $('#btnHint')?.addEventListener('click', showHint);
+  $('#btnAnalyze')?.addEventListener('click', analyzeNow);
   $('#btnAuto')?.addEventListener('click', autoFinish);
 
   // 键盘
@@ -1213,7 +1202,7 @@ init();
   onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
   onMenuItem,
   closeMenu, openMenuOf, toggleMenuById,
-  toggleMaximize, toggleMinimize, closeWindow, syncTitleButtons,
+  toggleMaximize, toggleMinimize, syncTitleButtons,
   get passCount(): PassCount { return passCount; },
   set passCount(v: PassCount) { passCount = v; },
   ledScore: (): Led => ledScore,

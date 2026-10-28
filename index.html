@@ -17,7 +17,6 @@
       <span class="tbtns">
         <span class="tbtn tbtn-min" title="最小化（收起牌桌，只留标题栏）" role="button" tabindex="0"><svg viewBox="0 0 8 7"><rect x="1" y="4.5" width="5" height="1.6" fill="#000"/></svg></span>
         <span class="tbtn tbtn-max" title="最大化（铺满屏幕）" role="button" tabindex="0"><svg viewBox="0 0 8 7"><rect x="1.2" y="1.2" width="5.6" height="4.6" fill="none" stroke="#000"/></svg></span>
-        <span class="tbtn tbtn-close" title="关闭（停止计时，需点「新游戏」重开）" role="button" tabindex="0"><svg viewBox="0 0 8 7"><path d="M1.5 1 L6.5 6 M6.5 1 L1.5 6" stroke="#000"/></svg></span>
       </span>
     </div>
 
@@ -55,6 +54,7 @@
       <div class="status-mid">
         <button class="btn" id="btnUndo" title="撤销（Ctrl+Z）">撤销</button>
         <button class="btn" id="btnHint" title="提示（H）">提示</button>
+        <button class="btn btn-analyze" id="btnAnalyze" title="分析局面（A）">分析局面</button>
         <button class="btn" id="btnAuto" title="自动完成（F）">自动完成</button>
       </div>
       <div class="led" id="ledTime" title="用时"></div>
@@ -89,6 +89,7 @@
       <li><strong>牌库</strong>：点一下翻牌，翻出的牌进废牌堆；牌库翻完后点牌库把废牌堆整体回收重翻。</li>
       <li><strong>拖动</strong>：按住一张明牌可连同下面整组合法牌一起拖走；也可以先点一下选中，再点目标列。</li>
       <li><strong>撤销</strong>：Ctrl+Z 或菜单「撤销」。<strong>提示</strong>：H 高亮一条推荐走法。<strong>自动完成</strong>：牌库清空且全明后可用。</li>
+      <li><strong>分析局面</strong>：点底栏「分析局面」或按 A，调用求解器判断当前局面的胜负状态。</li>
       <li><strong>键盘</strong>：F2 新游戏、Ctrl+Z 撤销、H 提示、F 自动完成、A 分析局面、Esc 关闭菜单；Alt+G / Alt+H 展开菜单。</li>
       <li><strong>触屏</strong>：点按选中/翻开，点目标位置放下；拖动同样支持。</li>
     </ul>

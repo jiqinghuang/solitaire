@@ -120,11 +120,6 @@ body {
 .win.minimized .statusbar { display: none; }
 .win.minimized { cursor: pointer; }
 
-/* 关闭：整扇窗口变灰、牌桌不可点，但保留可读信息 */
-.win.closed .tablewrap,
-.win.closed .statusbar { opacity: .45; pointer-events: none; filter: grayscale(1); }
-.win.closed .titlebar { background: linear-gradient(90deg, #6b6b6b 0%, #8a8a8a 100%); }
-
 .titlebar {
   height: 22px;
   background: linear-gradient(90deg, var(--navy) 0%, #2a4bbd 100%);
@@ -187,7 +182,7 @@ body {
   box-shadow: inset -1px -1px 0 var(--light), inset 1px 1px 0 var(--dark),
               inset -2px -2px 0 #dfdfdf, inset 2px 2px 0 var(--black);
 }
-.status-mid { display: flex; gap: 5px; flex: 1; justify-content: center; }
+.status-mid { display: flex; gap: 5px; flex: 1; min-width: 0; flex-wrap: wrap; justify-content: center; }
 
 .btn {
   min-width: 74px;
@@ -210,6 +205,28 @@ body {
   box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
               inset -2px -2px 0 var(--dark),   inset 2px 2px 0 #dfdfdf;
   padding: 4px 12px;
+}
+/* 求解器主入口：深蓝底 + 白字，与普通操作按钮形成明确层级 */
+.btn-analyze {
+  min-width: 96px;
+  color: #fff;
+  font-weight: bold;
+  background: #1f3fa8;
+  box-shadow: inset -1px -1px 0 #071747, inset 1px 1px 0 #9cb7ff,
+              inset -2px -2px 0 #102b78, inset 2px 2px 0 #456bd8;
+}
+.btn-analyze:hover { background: #2b50c8; }
+.btn-analyze:active {
+  box-shadow: inset 1px 1px 0 #071747, inset -1px -1px 0 #9cb7ff,
+              inset 2px 2px 0 #102b78;
+}
+.btn-analyze:disabled,
+.btn-analyze:disabled:active {
+  color: #e8e8e8;
+  background: #6d6d6d;
+  text-shadow: none;
+  box-shadow: inset -1px -1px 0 var(--black), inset 1px 1px 0 var(--light),
+              inset -2px -2px 0 var(--dark), inset 2px 2px 0 #dfdfdf;
 }
 
 /* ---- 七段 LED ---- */
