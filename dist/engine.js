@@ -422,13 +422,14 @@
             return { from: best.from, count: best.count, to: best.to, text: best.text };
         }
         /* ---- 自动完成 ---- */
-        /** 能否自动完成：牌库与废牌堆清空、全明，**且真的能把剩下的牌逐张收完**。
+        /** 能否自动完成：牌库清空、全明，**且真的能把剩下的牌逐张收完**。
+            废牌堆可以非空：autoFinishStep 会从废牌堆顶继续收牌。
             早期版本只看表面条件（空库 + 全明），导致「真死局」里按钮也是亮的、
-            点下去却什么都发生不了。现在用与 autoFinishStep 同一套贪心试跑一遗。 */
+            点下去却什么都发生不了。现在用与 autoFinishStep 同一套贪心试跑一遍。 */
         canAutoFinish() {
             if (this._phase !== 'playing')
                 return false;
-            if (this.stock.length !== 0 || this.waste.length !== 0 || !this.allFaceUp())
+            if (this.stock.length !== 0 || !this.allFaceUp())
                 return false;
             return this.sweepCompletes();
         }

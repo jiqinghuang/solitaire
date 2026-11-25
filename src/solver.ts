@@ -76,9 +76,14 @@ interface SolverReport {
   suggestion?: SolverSuggestion;
   /** quick 判定：还有合法走法，但只剩可逆/无净收益移动 */
   stalled?: boolean;
+  /** unknown 时触发的搜索上限：node=节点数，time=时间 */
+  limit?: 'node' | 'time';
 }
 
-/** 从引擎只读视图构建求解状态所需的最小接口 */
+/** 从引擎只读视图构建求解状态所需的最小接口。
+    注意：cardsAt 必须返回完整牌堆（包括牌阵/牌库里的暗牌）以及每张牌的 faceUp 标记；
+    求解器需要暗牌的完整顺序才能对“这一局实际发牌”做精确的赢/死局搜索。
+    如果传入只含明牌的视图，搜索会退化成看不到未来翻牌的近似，不能保证结论。 */
 interface EngineView {
   readonly passCount: PassCount;
   readonly phase: Phase;
@@ -194,19 +199,19 @@ interface EngineView {
     return false;
   }
 
-  /** 回收后的完整一轮里，是否会出现任何非翻牌走法。
+  /** 回收后的完整一轮里，是否会出现「有净进展」的走法。
       不能只看回收后的第一张：第一张不能走时，玩家仍可继续翻后面的牌；
       draw-3 也不能一律忽略，因为当前废牌堆可能来自已经抽走过牌的上一轮，
       回收后某一组的顶牌同样可能变成可行动的牌。
-      这里只模拟 draw，不执行其它走法；一旦发现合法走法即可保守地判定「未死」。
-      若整轮都没有非翻牌走法，继续回收只会重复同一状态环。 */
+      注意不能把 f2t（从收牌区拉回）或整列搬到空列这类可逆/无收益 t2t 当成解锁，
+      否则 quick 会把只剩倒牌的局误报成「还能推进」。 */
   function recycleUnlocks(st: SState, pass: PassCount): boolean {
     if (st.stock.length !== 0 || st.waste.length <= 1) return false;
     let cur = applyMove(st, { kind: 'draw' }, pass);   // 引擎语义：先只回收，不顺便翻牌
     const drawCount = Math.ceil(st.waste.length / pass);
     for (let i = 0; i < drawCount; i++) {
       cur = applyMove(cur, { kind: 'draw' }, pass);
-      if (moves(cur, pass).some((mv) => mv.kind !== 'draw')) return true;
+      if (moves(cur, pass).some((mv) => mv.kind !== 'draw' && isProductiveMove(cur, mv, pass))) return true;
     }
     return false;
   }
@@ -284,13 +289,18 @@ interface EngineView {
   }
 
   function keyOf(st: SState): string {
-    let k = st.found.join(',');
+    // 牌阵的 7 列在规则上完全等价，列号只是界面位置。
+    // 按列内容排序后编码，可把「同一局面换到别的空列/别的列」归一化，
+    // 显著减少 visited 里的对称状态；这不会改变胜负，因为走法可以随列置换一一对应。
+    const columns: string[] = [];
     for (let i = 0; i < 7; i++) {
       let mask = 0;
       for (let j = 0; j < st.up[i].length; j++) if (st.up[i][j]) mask |= 1 << j;
-      k += '|' + st.tab[i].join('-') + '/' + mask;
+      columns.push(st.tab[i].join('-') + '/' + mask);
     }
-    return k + '#' + st.stock.join('-') + '#' + st.waste.join('-');
+    columns.sort();
+    return st.found.join(',') + '|' + columns.join('|')
+      + '#' + st.stock.join('-') + '#' + st.waste.join('-');
   }
 
   /** 走法排序：先收牌、再翻暗牌、再普通移动，最后才翻牌（让 DFS 更快撞到胜利） */
@@ -312,7 +322,6 @@ interface EngineView {
     nodes: number;
     nodeLimit: number;
     deadline: number;
-    overflow: boolean;
   }
 
   /** 把一条走法翻译成人话（UI 展示「第一步该怎么走」用） */
@@ -505,45 +514,159 @@ interface EngineView {
       : null;
   }
 
-  type SearchResult = { verdict: 'win'; line: SMove[] } | { verdict: 'dead' | 'unknown'; line?: undefined };
+  /** 玩家可见状态编码：暗牌只保留“有几张、在什么位置”，不包含暗牌点数/花色。 */
+  function visibleKeyOf(st: SState): string {
+    const columns: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const pile = st.tab[i];
+      let hidden = 0;
+      while (hidden < pile.length && !st.up[i][hidden]) hidden++;
+      // 正常规则下暗牌一定在底部连续；若遇到异常状态，用 -1 占位避免把暗牌当明牌。
+      const visible = pile.slice(hidden).map((c, k) => st.up[i][hidden + k] ? c : -1).join('-');
+      columns.push(hidden + ':' + visible);
+    }
+    columns.sort();
+    return st.found.join(',') + '|' + columns.join('|')
+      + '#' + st.stock.length + '#' + st.waste.join('-');
+  }
 
-  /** 带全局 visited 的可达性搜索。
-      DFS 的 memo 只能记住已有结论，遇到 A→B→A 这种环会一直递归到深度上限，
-      于是明明只有 200 个状态也会返回 unknown。这里每个状态只展开一次：
-      若目标不可达，遍历完整个可达状态图就返回 dead；超出节点/时间上限才返回 unknown。
-      对单人游戏，重复回到已访问状态不会产生新结果，所以跳过回边是安全的。 */
+  /** 玩家视角下这一步的可见价值；不读暗牌点数，不做深层搜索。 */
+  function visibleMoveScore(st: SState, mv: SMove): number | null {
+    switch (mv.kind) {
+      case 'w2f':
+      case 't2f':
+        return 100;
+      case 'w2t':
+        return 60;
+      case 't2t':
+        if (mv.count === st.tab[mv.from].length && st.tab[mv.to].length === 0) return null;
+        if (mv.reveals) return 80;
+        return st.tab[mv.to].length === 0 ? 55 : 10;
+      case 'f2t':
+        return null;              // 玩家通常不会仅凭可见信息主动从收牌区拉牌
+      case 'draw':
+        return st.stock.length ? 20 : (st.waste.length > 1 ? 5 : null);
+    }
+  }
+
+  function visibleReason(st: SState, mv: SMove): string {
+    switch (mv.kind) {
+      case 'w2f':
+      case 't2f':
+        return '直接推进收牌区';
+      case 'w2t':
+        return '把废牌堆的牌接回牌阵';
+      case 't2t':
+        if (mv.reveals) return '能翻开一张暗牌';
+        return st.tab[mv.to].length === 0 ? '能腾出空列' : '整理牌阵，为后续接牌做准备';
+      case 'draw':
+        return st.stock.length ? '先翻牌看看' : '回收废牌堆重新翻牌';
+      case 'f2t':
+        return '从收牌区取回一张牌';
+    }
+  }
+
+  /** 只依赖可见信息的“净进展”判断；draw 不使用会读暗牌顺序的 recycleUnlocks。 */
+  function visibleProductive(st: SState, mv: SMove, pass: PassCount): boolean {
+    if (mv.kind === 'draw') return st.stock.length > 0 || st.waste.length > 1;
+    return isProductiveMove(st, mv, pass);
+  }
+
+  /** 玩家视角提示：只用当前可见信息挑一步，不偷看暗牌、不做深层模拟。
+      它保证合法、可执行，但只是“建议”，不是 win/dead 证明。 */
+  function recommendVisible(st: SState, pass: PassCount, opts: { avoid?: Set<string> } = {}): SolverSuggestion | null {
+    const seen = new Set<string>([visibleKeyOf(st), ...(opts.avoid ?? [])]);
+    let best: { move: SMove; score: number } | null = null;
+    for (const mv of usefulMoves(st, pass)) {
+      if (!visibleProductive(st, mv, pass)) continue;
+      const score = visibleMoveScore(st, mv);
+      if (score === null) continue;
+      const next = applyMove(st, mv, pass);
+      if (seen.has(visibleKeyOf(next))) continue;
+      if (!best || score > best.score) best = { move: mv, score };
+    }
+    if (!best) return null;
+    return {
+      move: best.move,
+      text: describeMove(st, best.move),
+      reason: visibleReason(st, best.move),
+      score: best.score,
+    };
+  }
+
+  type SearchLimit = 'node' | 'time';
+  type SearchResult =
+    | { verdict: 'win'; line: SMove[] }
+    | { verdict: 'dead'; line?: undefined }
+    | { verdict: 'unknown'; line?: undefined; limit: SearchLimit };
+
+  /** 当前是否触到搜索预算；返回触到的那一项。 */
+  function limitOf(ctx: Ctx): SearchLimit | null {
+    if (ctx.nodes >= ctx.nodeLimit) return 'node';
+    if (Date.now() > ctx.deadline) return 'time';
+    return null;
+  }
+
+  /** 带全局 visited 的可达性搜索（显式栈迭代版）。
+      单机单人、确定性游戏：状态图有限，每个状态只需展开一次；
+      因此遍历完整个可达状态图仍无解就返回 dead，超出节点/时间预算才返回 unknown。
+      以前这里用递归 DFS 并加了 `depth > 600` 的硬上限：第一条路径一深就提前放弃，
+      初始牌局常常只有 601 个节点、十几毫秒就返回 unknown，预算完全没用上。
+      现在改成显式栈，不再限制路径深度，只由 nodeLimit/timeLimit 控制。 */
   function searchReachable(root: SState, ctx: Ctx): SearchResult {
     const visited = new Set<string>();
     const path: SMove[] = [];
 
-    const walk = (st: SState, depth: number): 'win' | 'dead' | 'unknown' => {
-      if (isWin(st)) return 'win';
-      const key = keyOf(st);
-      if (visited.has(key)) return 'dead';
-      if (depth > 600 || ctx.nodes >= ctx.nodeLimit || Date.now() > ctx.deadline) {
-        ctx.overflow = true;
-        return 'unknown';
-      }
-      ctx.nodes++;
-      visited.add(key);
+    if (isWin(root)) return { verdict: 'win', line: [] };
+    const rootLimit = limitOf(ctx);
+    if (rootLimit) return { verdict: 'unknown', limit: rootLimit };
 
-      const list = moves(st, ctx.pass);
-      if (!list.length) return 'dead';
-      for (const mv of orderMoves(list, st)) {
-        const next = applyMove(st, mv, ctx.pass);
-        const nextKey = keyOf(next);
-        if (visited.has(nextKey)) continue;
+    ctx.nodes++;
+    visited.add(keyOf(root));
+
+    interface Frame {
+      st: SState;
+      moves: SMove[];
+      next: number;
+    }
+    const stack: Frame[] = [{
+      st: root,
+      moves: orderMoves(moves(root, ctx.pass), root),
+      next: 0,
+    }];
+
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      if (frame.next >= frame.moves.length) {
+        stack.pop();
+        if (stack.length) path.pop();   // pop the move that led into this frame
+        continue;
+      }
+
+      const mv = frame.moves[frame.next++];
+      const next = applyMove(frame.st, mv, ctx.pass);
+      const nextKey = keyOf(next);
+      if (visited.has(nextKey)) continue;
+
+      if (isWin(next)) {
         path.push(mv);
-        const result = walk(next, depth + 1);
-        if (result === 'win') return 'win';
-        path.pop();
-        if (result === 'unknown') return 'unknown';
+        return { verdict: 'win', line: path.slice() };
       }
-      return 'dead';
-    };
 
-    const verdict = walk(root, 0);
-    return verdict === 'win' ? { verdict, line: path.slice() } : { verdict };
+      const hit = limitOf(ctx);
+      if (hit) return { verdict: 'unknown', limit: hit };
+
+      visited.add(nextKey);
+      ctx.nodes++;
+      path.push(mv);
+      stack.push({
+        st: next,
+        moves: orderMoves(moves(next, ctx.pass), next),
+        next: 0,
+      });
+    }
+
+    return { verdict: 'dead' };
   }
   /* ============================ 死局原因诊断 ============================ */
 
@@ -554,12 +677,14 @@ interface EngineView {
     return false;
   }
 
-  /** 把第 col 列第 fromIdx 之后的牌移走后，能否翻开它下面那张暗牌 */
+  /** 把第 col 列第 hiddenIdx 张暗牌上方的牌移走后，能否翻开它。
+      条件必须是：上方所有牌都是明牌（暗牌不能移动），且其中至少有一张现在有去处。
+      原实现没有检查 `st.up`，会把上方暗牌当成可移动牌，导致真正的埋牌被漏报。 */
   function canExposeColumn(st: SState, col: number, hiddenIdx: number): boolean {
     const pile = st.tab[col];
     for (let k = hiddenIdx + 1; k < pile.length; k++) {
+      if (!st.up[col][k]) return false;   // 上面还有暗牌，本身就不可能移走
       const head = pile[k];
-      const count = pile.length - k;
       if (st.found[suitIdx(head)] === rankOf(head) - 1) return true;
       for (let j = 0; j < 7; j++) {
         if (j === col) continue;
@@ -581,20 +706,19 @@ interface EngineView {
       }
     }
 
-    // 1) 被永久埋住的暗牌
+    // 1) 被压住的暗牌：每列只看最上面那张暗牌（它才是下一步能翻开的牌）
     let buriedCount = 0;
-    for (let i = 0; i < 7 && buriedCount < 3; i++) {
+    for (let i = 0; i < 7 && buriedCount < 2; i++) {
       const pile = st.tab[i];
-      for (let k = 0; k < pile.length; k++) {
-        if (st.up[i][k]) continue;
-        if (!canExposeColumn(st, i, k)) {
-          reasons.push(SUIT_NAME[suitOf(pile[k])] + RANK_NAME[rankOf(pile[k])]
-            + '被压在第 ' + (i + 1) + ' 列的暗牌下面，而它上面的牌暂时无处可去，'
-            + (uncertain ? '当前没有立刻翻开它的走法。' : '这张牌永远翻不开。'));
-          buriedCount++;
-          break;
-        }
-        break;   // 只看每列最上面那张暗牌
+      let hiddenIdx = -1;
+      for (let k = pile.length - 1; k >= 0; k--) {
+        if (!st.up[i][k]) { hiddenIdx = k; break; }
+      }
+      if (hiddenIdx < 0) continue;
+      if (!canExposeColumn(st, i, hiddenIdx)) {
+        reasons.push(SUIT_NAME[suitOf(pile[hiddenIdx])] + RANK_NAME[rankOf(pile[hiddenIdx])]
+          + '被压在第 ' + (i + 1) + ' 列，上面的牌当前无处可去，暂时翻不开。');
+        buriedCount++;
       }
     }
 
@@ -608,7 +732,7 @@ interface EngineView {
     const wasteTop = st.waste.length ? st.waste[st.waste.length - 1] : -1;
     if (wasteTop >= 0 && !canGoAnywhere(st, wasteTop)) blocked.push(wasteTop);
 
-    for (const b of blocked.slice(0, 3)) {
+    for (const b of blocked.slice(0, 2)) {
       const r = rankOf(b);
       if (r === 13) {
         reasons.push(cardText(b) + (uncertain ? '暂时无处可去：' : '无处可去：') + '只有空列才接 K，而牌阵现在腾不出空列。');
@@ -650,7 +774,10 @@ interface EngineView {
       for (let i = 0; i < 7; i++) {
         const pile = st.tab[i];
         const top = pile.length ? pile[pile.length - 1] : -1;
-        if (top >= 0 && rankOf(top) === 13 && st.up[i][pile.length - 1]) movableK = true;
+        // 没有空列时，K 唯一能走的方向是同花色的收牌区（该花色已收到 Q）。
+        // 只有真能走掉才会腾出新空列；仅仅“顶上是 K”并不等于可动。
+        if (top >= 0 && rankOf(top) === 13 && st.up[i][pile.length - 1]
+          && st.found[suitIdx(top)] === 12) movableK = true;
       }
       if (!movableK) reasons.push('牌阵里没有空列，也没有可动的 K 能开新列，周转空间不足。');
     }
@@ -691,8 +818,9 @@ interface EngineView {
       line?: SMove[],
       suggestion?: SolverSuggestion,
       stalled?: boolean,
+      limit?: 'node' | 'time',
     ): SolverReport => ({
-      verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line, suggestion, stalled,
+      verdict, reasons, nodes, elapsedMs: Date.now() - t0, winningLine: line, suggestion, stalled, limit,
     });
 
     if (opts.quick) {
@@ -716,11 +844,11 @@ interface EngineView {
       nodes: 0,
       nodeLimit: opts.nodeLimit ?? 40000,
       deadline: t0 + (opts.timeLimit ?? 400),
-      overflow: false,
     };
     const searched = searchReachable(st, ctx);
     let verdict = searched.verdict;
     let line = searched.line;
+    const limit = searched.verdict === 'unknown' ? searched.limit : undefined;
 
     // 完整搜索证明不了输赢时，不直接甩一句「太复杂」：用有限前瞻给出当前最值得尝试的一步。
     // 若前瞻真的走完整局，则那条路线本身就是构造性证明，可以放心升级为 win。
@@ -738,7 +866,8 @@ interface EngineView {
     } else if (verdict === 'win') {
       reasons = ['求解器已找到一条完整胜利路线。'];
     } else {
-      reasons = ['完整搜索在节点/时间上限内没有结束，因此不谎报输赢。'];
+      const limitText = limit === 'node' ? '节点上限' : limit === 'time' ? '时间上限' : '搜索上限';
+      reasons = ['完整搜索在' + limitText + '内没有结束，因此不谎报输赢。'];
       reasons.push(...diagnose(st, pass, true).slice(0, 3));
       if (suggestion) {
         reasons.push('下面是有限前瞻给出的可执行建议；它有帮助，但不代表已经证明必胜。');
@@ -762,11 +891,12 @@ interface EngineView {
           winningPath: line,
         }
       : suggestion;
-    return report(verdict, ctx.nodes, reasons, line, actionable ?? undefined);
+    return report(verdict, ctx.nodes, reasons, line, actionable ?? undefined, undefined, limit);
   }
   return {
     analyze,
     recommend,
+    recommendVisible,
     diagnose,
     fromEngine,
     hasAnyMove,
@@ -775,6 +905,7 @@ interface EngineView {
     canPlace,
     describeMove,
     stateKey: keyOf,
+    visibleStateKey: visibleKeyOf,
     cardIndex,
     suitOf,
     rankOf,

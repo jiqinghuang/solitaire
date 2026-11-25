@@ -448,6 +448,13 @@ section('U8 键盘快捷键', () => {
   ok(true, 'H 提示不抛异常');
   clickCard(stockEl);
   const moves = U.engine().moves;
+  const stockAfterDraw = U.engine().stockCount;
+  keydown('n');
+  ok(U.engine().moves === moves && U.engine().stockCount === stockAfterDraw,
+    '裸 n 不再无确认重开新局（回归：误触丢牌局）');
+  const pendingBefore = pendingTimers.size;
+  keydown('a', { ctrlKey: true });
+  ok(pendingTimers.size === pendingBefore, 'Ctrl+A 不再触发页面内分析（保留浏览器全选）');
   keydown('z', { ctrlKey: true });
   ok(U.engine().moves === moves - 1, 'Ctrl+Z 撤销');
   keydown('F2');
@@ -500,6 +507,11 @@ section('U12 拖到废牌堆 / 牌库一律静默回弹（回归：以前弹错�
   dragCard(colCard(0, 0), wasteEl);                // dragCard 内部会把 elementFromPoint 指向废牌堆
   ok(U.engine().tableauCount(0) === 1, '牌没有被移走');
   ok(before === 1 && toastEl.textContent === 'SENTINEL', '不弹错误提示，与拖到空白处行为一致');
+
+  // 拖回原列是常见的“手抖回弹”，不能弹“不能这样叠放”。
+  dragCard(colCard(0, 0), colEl(0));
+  ok(U.engine().tableauCount(0) === 1 && toastEl.textContent === 'SENTINEL',
+    '拖回原列静默还原');
 });
 
 section('U13 restart 与自动完成的边界', () => {
@@ -593,6 +605,21 @@ section('U16 死局自动检测与原因面板', () => {
   U.clearPanel();
   U.checkDeath();
   ok(tableEl.querySelectorAll('.info-banner').length === 0, '还有得走时不弹死局面板（不误报）');
+});
+
+section('U16b 翻牌/回收后进入死局也要弹面板', () => {
+  // 翻牌前还有牌可翻，翻完这一张后进入 quick-dead；以前 doDraw 不跑 checkDeath。
+  U.setEngine(SOL.Solitaire.planted({
+    stock: [['C', 5]],
+    waste: [['S', 12]],
+    tableau: [[['H', 3]]],
+  }));
+  U.clearPanel();
+  U.doDraw();
+  const panels = tableEl.querySelectorAll('.info-banner');
+  ok(panels.length === 1, '翻牌后进入死局时弹出结论面板');
+  ok((panels[0]?.querySelector('h3')?.textContent ?? '').includes('无法继续'),
+    '面板标题说明局面已无法继续');
 });
 
 section('U17 「分析局面」给出结论与原因', () => {

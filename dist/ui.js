@@ -129,10 +129,16 @@ let autoPromptShown = false;
 /** 自动完成定时器及所属牌局；撤销/新局时必须使旧回调失效。 */
 let autoFinishTimer = null;
 let gameGeneration = 0;
+/** 连续点击「分析局面」时，旧分析结果必须作废。 */
+let analysisSeq = 0;
+/** 分析用 Web Worker；浏览器不支持或 file:// 禁止时回退同步搜索。 */
+let analysisWorker = null;
 let hintTimer = null;
 /** 提示/分析走过的局面；用于阻断 A→B→A 这类提示循环。 */
 let hintVisited = new Set();
 let lastHintKey = null;
+/** 玩家视角提示走过的可见局面（不含暗牌身份，避免提示偷看暗牌）。 */
+let hintVisibleVisited = new Set();
 let winTimer = null;
 let clockTimer = null;
 let toastTimer = null;
@@ -515,7 +521,10 @@ function onPointerDown(e) {
     }
     if (engine.phase === 'won')
         return;
-    const rect = target.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+    // 用户可能按在牌内部的角标/pip/SVG 上；偏移必须以整张牌为基准，
+    // 否则拖动克隆层会从牌面左上角跳一下。
+    const dragCard = target?.closest?.('.card') ?? target;
+    const rect = dragCard.getBoundingClientRect?.() ?? { left: 0, top: 0 };
     drag = {
         source: src,
         el: null,
@@ -576,10 +585,15 @@ function onPointerUp(e) {
         selectSource(d.source);
         return;
     }
-    // 拖动结束：落点合法就移动，否则回弹
+    // 拖动结束：落点合法就移动，否则回弹。
+    // 落回原牌堆不是非法操作，应静默还原，不能弹「不能这样叠放」的 toast。
     const dst = dropTargetAt(x, y, d.source);
     clearDragVisual();
     clearDropHighlights();
+    if (dst && sameLocation(d.source.loc, dst)) {
+        render();
+        return;
+    }
     if (dst)
         tryMove(d.source, dst);
     else
@@ -659,6 +673,7 @@ function autoCollect(loc) {
     const suit = engine.autoMove(loc);
     if (!suit)
         return false;
+    clearPanel();
     clearTransient();
     render();
     checkAutoFinishPrompt();
@@ -681,6 +696,10 @@ function doDraw() {
         toast('废牌堆已回收，重新翻牌', 1200);
     else if (engine.stockCount === 0 && engine.wasteCount > 0)
         toast('牌库已空，点击牌库可回收废牌堆', 1600);
+    // 翻牌/回收也可能把局面推进到「可自动完成」或「已经死局」。
+    // 之前只在移牌后检查，导致翻完最后一张后玩家看不到任何结论。
+    checkAutoFinishPrompt();
+    checkDeath();
 }
 /* ---- 提示 ---- */
 function clearHint() {
@@ -749,6 +768,7 @@ function showHintObject(h) {
 }
 function resetHintHistory() {
     hintVisited = new Set();
+    hintVisibleVisited = new Set();
     lastHintKey = null;
 }
 /** 记录当前提示状态；返回 false 表示回到了已经提示过的局面（循环）。 */
@@ -775,22 +795,19 @@ function rememberHintState(st) {
 function showHint() {
     if (engine.phase === 'won')
         return;
-    // 优先使用求解器的有限前瞻建议，而不是只看一层的 engine.hint()。
-    // 求解器仍可能返回 unknown，但 recommendation 始终是合法且当前评分最高的一步。
+    // 提示默认走「玩家视角」：只用当前可见信息选一步，不读取暗牌点数，也不做深层搜索。
+    // 这样建议是玩家自己也能推导出来的，不会出现“求解器偷看牌库”的感觉。
     const st = Solver.fromEngine(engine);
-    if (!enterHintState(st))
-        return;
-    const sug = Solver.recommend(st, engine.passCount, {
-        depth: 4, width: 40, nodeLimit: 4000, avoid: hintVisited,
-    });
+    const visibleKey = Solver.visibleStateKey(st);
+    const sug = Solver.recommendVisible(st, engine.passCount, { avoid: hintVisibleVisited });
     const h = sug ? hintFromSuggestion(st, sug) : null;
     if (!h) {
-        // 不再退回 engine.hint()：那会把可逆的左右倒牌继续当成建议，形成无限循环。
-        toast('当前没有能推进局面的走法，可能只剩可逆移动；建议撤销或重新发牌', 2800);
+        toast('玩家视角下当前没有能推进局面的走法，可能只剩可逆移动；建议撤销或重新发牌', 2800);
         return;
     }
-    // 把「为什么推荐」也放进提示，避免只看到移动文案却不知道价值。
-    h.text += '（' + sug.reason + '）';
+    hintVisibleVisited.add(visibleKey);
+    // 把「为什么推荐」和视角也放进提示，避免只看到移动文案却不知道价值。
+    h.text = '玩家视角：' + h.text + '（' + sug.reason + '）';
     showHintObject(h);
 }
 /* ---- 自动完成 ---- */
@@ -807,6 +824,14 @@ function stopAutoFinish() {
         clearTimeout(autoFinishTimer);
         autoFinishTimer = null;
     }
+    // 主动停掉仍在跑的分析 Worker，避免切局/撤销后还有旧结果回来。
+    if (analysisWorker) {
+        try {
+            analysisWorker.terminate();
+        }
+        catch { /* 忽略环境差异 */ }
+        analysisWorker = null;
+    }
     // 即使当前正处于同步 step 中，也让尚未排队的旧回调失效。
     gameGeneration++;
 }
@@ -814,7 +839,7 @@ function autoFinish() {
     if (engine.phase === 'won')
         return;
     if (!engine.canAutoFinish()) {
-        toast('牌库和废牌堆清空、所有牌翻开后才能自动完成', 2000);
+        toast('牌库清空、所有牌翻开后才能自动完成', 2000);
         return;
     }
     stopAutoFinish();
@@ -1155,13 +1180,13 @@ function showPanel(title, subtitle, reasons, buttons) {
     }
     const row = document.createElement('div');
     row.className = 'btn-row';
-    for (const [label, fn] of buttons) {
+    for (const [label, fn, keepOpen] of buttons) {
         const b = document.createElement('button');
         b.className = 'btn';
         b.textContent = label;
         b.addEventListener('click', () => {
-            // 高亮类按钮只做视觉提示，保留结论面板；其它操作（撤销/重发/关闭）才收起面板。
-            if (!label.includes('高亮'))
+            // 行为由调用方显式指定，不再靠按钮文案里是否含「高亮」来判断。
+            if (!keepOpen)
                 clearPanel();
             fn();
         });
@@ -1202,6 +1227,9 @@ function analyzeNow() {
         toast('这局已经赢了。', 1500);
         return;
     }
+    // 分析期间不能让自动完成继续改牌；同时让之前排队的分析/自动完成失效。
+    stopAutoFinish();
+    const seq = ++analysisSeq;
     clearPanel();
     toast('正在分析局面…', 6000);
     const st = Solver.fromEngine(engine);
@@ -1209,8 +1237,8 @@ function analyzeNow() {
     const pass = engine.passCount;
     const generation = gameGeneration;
     const finish = (rep) => {
-        // 分析期间可能已经撤销/开新局：结果作废，不能弹出误导面板
-        if (generation !== gameGeneration)
+        // 分析期间可能已经撤销/开新局，或又点了一次分析：结果作废，不能弹出误导面板
+        if (generation !== gameGeneration || seq !== analysisSeq)
             return;
         const head = rep.verdict === 'win' ? '这局还能赢'
             : rep.verdict === 'dead' ? '这局已经死局'
@@ -1221,15 +1249,17 @@ function analyzeNow() {
         const sub = rep.verdict === 'win' ? '求解器已找到完整胜利路线。'
             : rep.verdict === 'dead' ? '无论怎么走都赢不了了。建议撤销几步，或重新发牌。'
                 : '完整搜索没有在限定时间内结束，但下面给出了可执行的有限前瞻建议。';
+        const perspective = '分析基于完整牌局（含暗牌）；「提示」按钮则只看玩家可见的牌。';
         const buttons = [];
         if (suggestedHint) {
-            buttons.push([rep.verdict === 'win' ? '高亮必胜第一步' : '高亮建议', () => showHintObject(suggestedHint)]);
+            // 第三个参数 true：点击高亮后面板保留，方便继续看原因。
+            buttons.push([rep.verdict === 'win' ? '高亮必胜第一步' : '高亮建议', () => showHintObject(suggestedHint), true]);
         }
         buttons.push(['重新发牌', () => restart()], ['关闭', () => { }]);
-        showPanel(head, sub + suggestionText + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms）', rep.reasons, buttons);
+        showPanel(head, sub + suggestionText + '（搜索 ' + rep.nodes + ' 个局面，耗时 ' + rep.elapsedMs + 'ms。' + perspective + '）', rep.reasons, buttons);
     };
     const heavy = () => {
-        if (generation !== gameGeneration)
+        if (generation !== gameGeneration || seq !== analysisSeq)
             return;
         const rep = Solver.analyze(st, pass, {
             nodeLimit: 60000, timeLimit: 700, avoidSuggestionStates: hintVisited,
@@ -1242,8 +1272,68 @@ function analyzeNow() {
         else
             setTimeout(fn, 0);
     };
-    // 先让「正在分析」上屏，再跑搜索
-    nextFrame(heavy);
+    /** 优先把搜索放到 Worker；浏览器不支持 Worker / file:// 限制时回退同步。 */
+    const startWorker = () => {
+        if (typeof Worker !== 'function')
+            return false;
+        let w;
+        try {
+            w = new Worker('dist/solver-worker.js');
+        }
+        catch {
+            return false;
+        }
+        analysisWorker = w;
+        w.onmessage = (ev) => {
+            if (analysisWorker !== w)
+                return;
+            analysisWorker = null;
+            try {
+                w.terminate();
+            }
+            catch { /* 忽略环境差异 */ }
+            if (ev?.data?.error) {
+                toast('分析线程出错，改用同步分析', 1800);
+                nextFrame(heavy);
+                return;
+            }
+            finish(ev?.data?.report);
+        };
+        w.onerror = () => {
+            if (analysisWorker !== w)
+                return;
+            analysisWorker = null;
+            try {
+                w.terminate();
+            }
+            catch { /* 忽略环境差异 */ }
+            nextFrame(heavy);
+        };
+        try {
+            w.postMessage({
+                st,
+                pass,
+                opts: {
+                    nodeLimit: 60000,
+                    timeLimit: 700,
+                    // Set 不保证在所有环境的 structured clone 中一致，显式转数组。
+                    avoidSuggestionStates: Array.from(hintVisited),
+                },
+            });
+        }
+        catch {
+            analysisWorker = null;
+            try {
+                w.terminate();
+            }
+            catch { /* 忽略环境差异 */ }
+            return false;
+        }
+        return true;
+    };
+    // Worker 能把搜索移出主线程；不可用时才退回原来的同步路径。
+    if (!startWorker())
+        nextFrame(heavy);
 }
 function showRules() {
     const el = $('.rules');
@@ -1391,6 +1481,11 @@ function bindEvents() {
             closeMenu();
             return;
         }
+        // 单键快捷键必须是“裸键”：否则 Ctrl+F/Ctrl+A/Ctrl+H 等浏览器快捷键
+        // 会被页面抢走；尤其原来无确认的 n 会直接把当前牌局重开。
+        const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+        if (!plain)
+            return;
         if (menuOpen) {
             // 菜单展开时：字母直接触发对应项；G/H 收起当前菜单（与原版一致）。
             // 「帮助」菜单里的 H 既是展开键又是「玩法说明」的助记键，这里以菜单项优先。
@@ -1423,11 +1518,6 @@ function bindEvents() {
         if (k === 'u') {
             e.preventDefault();
             undo();
-            return;
-        }
-        if (k === 'n') {
-            e.preventDefault();
-            newGame();
             return;
         }
         if (k === 'a') {

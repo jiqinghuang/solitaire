@@ -397,6 +397,18 @@ section('13 canAutoFinish 真的能收完才算数', () => {
         },
     });
     ok(ready.canAutoFinish() === true, '真的收得完时才返回 true');
+    // 废牌堆非空时也可以自动完成：autoFinishStep 会从 waste 顶继续收牌。
+    const wasteReady = EngineCtor.planted({
+        foundations: {
+            S: Array.from({ length: 12 }, (_, i) => ['S', i + 1]),
+            H: Array.from({ length: 13 }, (_, i) => ['H', i + 1]),
+            D: Array.from({ length: 13 }, (_, i) => ['D', i + 1]),
+            C: Array.from({ length: 13 }, (_, i) => ['C', i + 1]),
+        },
+        waste: [['S', 13, true]],
+    });
+    ok(wasteReady.canAutoFinish() === true, '牌库空、全明但废牌堆有牌时也能自动完成');
+    ok(wasteReady.autoFinishStep() === true && wasteReady.phase === 'won', '自动完成可以从废牌堆顶收下最后一张牌');
 });
 section('14 求解器与引擎的走法及状态转移必须一致（对拍）', () => {
     let mismatch = 0, checked = 0;
@@ -702,6 +714,89 @@ section('21 可逆左右倒牌不会形成无限建议循环', () => {
     const full = V.analyze(st, 1, {});
     ok(full.verdict === 'dead', '完整可达性搜索能处理状态环并证明该局面死局（实际：' + full.verdict + '）');
     ok(full.suggestion === undefined, '死局不输出误导性的下一步建议');
+});
+section('22 搜索不再被 600 层截断，能给出可验证的长胜利路线', () => {
+    const e = new EngineCtor(lcg(2), () => 0, 1);
+    const rep = V.analyze(V.fromEngine(e), 1, { nodeLimit: 200000, timeLimit: 2000 });
+    ok(rep.verdict === 'win', '固定种子 2 判为 win（实际：' + rep.verdict + '）');
+    ok(rep.nodes > 601, '搜索节点数超过旧版 601 层截断（实际：' + rep.nodes + '）');
+    ok(Array.isArray(rep.winningLine) && rep.winningLine.length > 601, '给出超过旧深度的完整路线（实际：' + (rep.winningLine?.length ?? 0) + ' 步）');
+    let engineOK = true;
+    for (const mv of rep.winningLine ?? []) {
+        if (!applySolverMoveToEngine(e, mv)) {
+            engineOK = false;
+            break;
+        }
+    }
+    ok(engineOK && e.phase === 'won', '完整路线能在真实引擎上执行并获胜');
+});
+section('23 死局诊断看最上面暗牌，不把更下面的暗牌当成可翻牌', () => {
+    const e = EngineCtor.planted({
+        foundations: { H: Array.from({ length: 13 }, (_, i) => ['H', i + 1]),
+            D: Array.from({ length: 13 }, (_, i) => ['D', i + 1]),
+            C: Array.from({ length: 13 }, (_, i) => ['C', i + 1]) },
+        tableau: [
+            [['S', 5, false], ['C', 6, false], ['S', 7, true]],
+            [['D', 7, true]], [], [], [], [], [],
+        ],
+    });
+    const reasons = V.diagnose(V.fromEngine(e), 1);
+    ok(reasons.some((r) => r.includes('梅花6')), '点名真正压住暗牌的梅花6');
+    ok(!reasons.some((r) => r.includes('黑桃5')), '不把更底下的黑桃5误报成当前可翻的牌');
+});
+section('24 回收解锁不会把 f2t 当成净进展', () => {
+    const e = EngineCtor.planted({
+        foundations: { S: [['S', 1]] },
+        waste: [['C', 5], ['C', 6]],
+        tableau: [[['H', 2, true]]],
+    });
+    const q = V.analyze(V.fromEngine(e), 1, { quick: true });
+    ok(q.verdict === 'unknown' && q.stalled === true, '只剩 f2t/回收时 quick 应标记 stalled，而不是「还能推进」');
+});
+section('25 玩家视角提示不读取暗牌身份', () => {
+    const a = EngineCtor.planted({
+        tableau: [[['S', 9, false], ['H', 8, true]], [['C', 7, true]], [], [], [], [], []],
+    });
+    const b = EngineCtor.planted({
+        tableau: [[['S', 5, false], ['H', 8, true]], [['C', 7, true]], [], [], [], [], []],
+    });
+    const ra = V.recommendVisible(V.fromEngine(a), 1);
+    const rb = V.recommendVisible(V.fromEngine(b), 1);
+    ok(ra !== null && rb !== null && mvKey(ra.move) === mvKey(rb.move), '同一可见牌面、不同暗牌时，玩家视角建议相同');
+    const reversible = EngineCtor.planted({
+        tableau: [[['S', 7, true], ['H', 6, true]], [['C', 7, true]], [], [], [], [], []],
+    });
+    ok(V.recommendVisible(V.fromEngine(reversible), 1) === null, '只有可逆左右倒牌时不给出玩家视角建议');
+});
+section('26 牌阵列置换视为同一搜索状态', () => {
+    const a = EngineCtor.planted({
+        tableau: [[['S', 7, true]], [['H', 8, true]], [], [], [], [], []],
+    });
+    const b = EngineCtor.planted({
+        tableau: [[['H', 8, true]], [['S', 7, true]], [], [], [], [], []],
+    });
+    ok(V.stateKey(V.fromEngine(a)) === V.stateKey(V.fromEngine(b)), '交换两列后的状态 key 相同，减少对称状态搜索');
+});
+section('27 分析 Worker 能加载 solver 并返回报告', () => {
+    const fs = require('fs');
+    const vm = require('vm');
+    const source = fs.readFileSync(__dirname + '/solver-worker.js', 'utf8');
+    let out = null;
+    const ctx = {
+        Set, console,
+        postMessage: (m) => { out = m; },
+    };
+    ctx.self = ctx;
+    ctx.importScripts = () => { ctx.SolitaireSolver = V; };
+    vm.createContext(ctx);
+    vm.runInContext(source, ctx);
+    const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);
+    const e = EngineCtor.planted({
+        foundations: { S: F('S', 12), H: F('H', 13), D: F('D', 13), C: F('C', 13) },
+        tableau: [[['S', 13]]],
+    });
+    ctx.onmessage({ data: { id: 7, st: V.fromEngine(e), pass: 1, opts: { nodeLimit: 20000, timeLimit: 1000 } } });
+    ok(out?.id === 7 && out?.report?.verdict === 'win' && out?.report?.winningLine?.length === 1, 'Worker 脚本能执行 analyze 并回传胜利路线');
 });
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail ? 1 : 0);
