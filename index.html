@@ -21,29 +21,29 @@
     </div>
 
     <!-- 菜单栏 -->
-    <div class="menubar">
+    <div class="menubar" role="menubar">
       <div class="menu" id="menuGame">
-        <span class="menutitle">游戏(<u>G</u>)</span>
-        <div class="dropdown" id="menuGameDrop" hidden>
-          <div class="mi" data-act="new"><span class="chk"></span>新游戏(<u>N</u>)<span class="sc">F2</span></div>
-          <div class="mi" data-act="restart"><span class="chk"></span>重新发牌(<u>R</u>)</div>
-          <div class="sep"></div>
-          <div class="mi" data-act="draw1"><span class="chk">●</span>翻一张(<u>1</u>)</div>
-          <div class="mi" data-act="draw3"><span class="chk"> </span>翻三张(<u>3</u>)</div>
-          <div class="sep"></div>
-          <div class="mi" data-act="undo"><span class="chk"></span>撤销(<u>U</u>)<span class="sc">Ctrl+Z</span></div>
-          <div class="mi" data-act="hint"><span class="chk"></span>提示(<u>H</u>)<span class="sc">H</span></div>
-          <div class="mi" data-act="autofinish"><span class="chk"></span>自动完成(<u>F</u>)<span class="sc">F</span></div>
-          <div class="sep"></div>
-          <div class="mi" data-act="analyze"><span class="chk"></span>分析局面(<u>A</u>)<span class="sc">A</span></div>
+        <span class="menutitle" role="menuitem" tabindex="0" aria-haspopup="true" aria-expanded="false">游戏(<u>G</u>)</span>
+        <div class="dropdown" id="menuGameDrop" role="menu" aria-label="游戏菜单" hidden>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="new"><span class="chk"></span>新游戏(<u>N</u>)<span class="sc">F2</span></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="restart"><span class="chk"></span>重新发牌(<u>R</u>)</div>
+          <div class="sep" role="separator"></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="draw1"><span class="chk">●</span>翻一张(<u>1</u>)</div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="draw3"><span class="chk"> </span>翻三张(<u>3</u>)</div>
+          <div class="sep" role="separator"></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="undo"><span class="chk"></span>撤销(<u>U</u>)<span class="sc">Ctrl+Z</span></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="hint"><span class="chk"></span>提示(<u>H</u>)<span class="sc">H</span></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="autofinish"><span class="chk"></span>自动完成(<u>F</u>)<span class="sc">F</span></div>
+          <div class="sep" role="separator"></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="analyze"><span class="chk"></span>分析局面(<u>A</u>)<span class="sc">A</span></div>
         </div>
       </div>
       <div class="menu" id="menuHelp">
-        <span class="menutitle">帮助(<u>H</u>)</span>
-        <div class="dropdown" id="menuHelpDrop" hidden>
-          <div class="mi" data-act="rules"><span class="chk"></span>玩法说明(<u>R</u>)</div>
-          <div class="sep"></div>
-          <div class="mi" data-act="about"><span class="chk"></span>关于纸牌(<u>A</u>)</div>
+        <span class="menutitle" role="menuitem" tabindex="0" aria-haspopup="true" aria-expanded="false">帮助(<u>H</u>)</span>
+        <div class="dropdown" id="menuHelpDrop" role="menu" aria-label="帮助菜单" hidden>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="rules"><span class="chk"></span>玩法说明(<u>R</u>)</div>
+          <div class="sep" role="separator"></div>
+          <div class="mi" role="menuitem" tabindex="-1" data-act="about"><span class="chk"></span>关于纸牌(<u>A</u>)</div>
         </div>
       </div>
     </div>

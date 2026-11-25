@@ -284,6 +284,7 @@ section('10 随机对拍（200 局发牌 → 打乱 → 校验不变量）', () 
             dealtOk = false;
         // 随机做 40 步操作（翻牌 / 移动 / 双击），每步检查牌数守恒
         const before = e.moves;
+        const initialSig = allCards(e).map((c) => signature(c) + (c.faceUp ? 'u' : 'd')).sort().join(',');
         for (let step = 0; step < 40; step++) {
             const roll = rand();
             if (roll < 0.4)
@@ -308,12 +309,13 @@ section('10 随机对拍（200 局发牌 → 打乱 → 校验不变量）', () 
         if (e.moves !== before)
             undoOk = false;
         const cards = allCards(e);
-        if (cards.length !== 52 || cards.some((c) => c.faceUp && false))
+        const finalSig = cards.map((c) => signature(c) + (c.faceUp ? 'u' : 'd')).sort().join(',');
+        if (cards.length !== 52 || finalSig !== initialSig)
             undoOk = false;
     }
     ok(dealtOk, '每局发牌都是 52 张不重复、牌库 24 张');
     ok(moveOk, '随机操作后牌数守恒、无重复');
-    ok(undoOk, '撤销到底后步数归零、牌数守恒');
+    ok(undoOk, '撤销到底后步数归零、每张牌的位置与明暗完全复原');
 });
 /* ---------- [11] 边界与非法输入 ---------- */
 section('11 边界与参数校验', () => {
@@ -520,7 +522,7 @@ section('15 求解器判定', () => {
     // 不谎报：有得走但搜不出结论时返回 unknown
     const mid = new EngineCtor(lcg(42), () => 0, 1);
     const mm = V.analyze(V.fromEngine(mid), 1, { nodeLimit: 200, timeLimit: 20 });
-    ok(['win', 'dead', 'unknown'].includes(mm.verdict), '中局返回三态之一（实际=' + mm.verdict + '）');
+    ok(mm.verdict === 'unknown' && (mm.limit === 'node' || mm.limit === 'time'), '极小预算下返回 unknown 并说明触发的上限（实际=' + mm.verdict + '/' + mm.limit + '）');
 });
 section('16 死局原因诊断', () => {
     const F = (s, n) => Array.from({ length: n }, (_, i) => [s, i + 1]);

@@ -27,7 +27,8 @@ const clamp = (lo: number, v: number, hi: number): number => Math.min(Math.max(v
 
 /** --gap: clamp(4px, 100vw/120, 13px) */
 const GAP_MIN = 4, GAP_MAX = 13, GAP_DIV = 120;
-/** --card-w: clamp(30px, (100vw - 56 - gap*8 - 6)/7, 132px) */
+/** --card-w: clamp(30px, (var(--viewport-w) - 56 - gap*8 - 6)/7, 132px)
+    测试里用视口宽度近似 --viewport-w；ui.ts 实际会把它换成不含滚动条的 clientWidth。 */
 const CARD_MIN = 30, CARD_MAX = 132, CHROME = 56, BORDER = 6, COLS = 7;
 
 /**

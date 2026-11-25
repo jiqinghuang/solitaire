@@ -88,7 +88,6 @@ interface SolitaireAPI {
   rankLabel(rank: number): string;
   suitLabel(suit: Suit): string;
   sameLocation(a: PileRef, b: PileRef): boolean;
-  foundationBase(suit: Suit): number;
 }
 
 interface SolitaireCtor {
@@ -121,7 +120,6 @@ type CardSpec = [Suit, number, boolean?];
   const isRed = (c: Card): boolean => c.suit === 'H' || c.suit === 'D';
   const rankLabel = (r: number): string => RANK_LABEL[r] ?? '?';
   const suitLabel = (s: Suit): string => SUIT_LABEL[s] ?? '?';
-  const foundationBase = (s: Suit): number => SUITS.indexOf(s);
 
   function sameLocation(a: PileRef, b: PileRef): boolean {
     if (a.kind !== b.kind) return false;
@@ -591,5 +589,5 @@ type CardSpec = [Suit, number, boolean?];
     }
   }
 
-  return { Solitaire: SolitaireImpl, SUITS, isRed, rankLabel, suitLabel, sameLocation, foundationBase };
+  return { Solitaire: SolitaireImpl, SUITS, isRed, rankLabel, suitLabel, sameLocation };
 });

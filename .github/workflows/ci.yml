@@ -26,12 +26,15 @@ jobs:
       # 重新编译后与提交内容必须逐字节一致，否则失败并给出可读的修复指引。
       - name: dist 与 src 同步校验
         run: |
+          # 先清空 dist 再编译，避免删除/改名源码后遗留的孤儿产物让校验误通过。
+          rm -rf dist
+          npm run build
           git add -A dist
-          if ! git diff --cached --ignore-cr-at-eol --quiet; then
+          if ! git diff --cached --quiet; then
             echo "::error::dist/ 与 src/ 不同步——你改了源码但忘了提交编译产物。"
             echo "本地执行：npm run build && git add dist && git commit"
             echo "----- 差异摘要 -----"
-            git diff --cached --ignore-cr-at-eol --stat
+            git diff --cached --stat
             exit 1
           fi
           echo "dist/ 与 src/ 一致。"

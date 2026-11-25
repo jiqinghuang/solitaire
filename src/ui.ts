@@ -169,10 +169,18 @@ const tableauEl = (): any => $('#tableau');
 
 /* ---- 尺寸：牌宽现在是 CSS clamp() 响应式的，**必须测量真实牌元素**。
        注意：getPropertyValue('--card-w') 对自定义属性返回的是未解析的原始字符串
-       （形如 "clamp(36px, calc((100vw - 96px) / 7), 132px)"），parseFloat 只会拿到
+       （形如 "clamp(36px, calc((var(--viewport-w) - 96px) / 7), 132px)"），parseFloat 只会拿到
        下限 36，完全错。所以这里优先用 getBoundingClientRect 量真牌。
        量不到时（非浏览器环境、牌库未渲染）才退回读变量的纯 px 值。
        fallback 值与 style.css 的 :root 保持一致。 */
+
+/** 用 clientWidth（不含经典滚动条）覆盖 CSS 的 100vw 兜底，避免窄窗口右侧被裁。 */
+function syncViewportWidth(): void {
+  const root: any = document.documentElement;
+  const width = root?.clientWidth;
+  if (typeof width === 'number' && width > 0) root?.style?.setProperty?.('--viewport-w', width + 'px');
+}
+
 function metrics(): { w: number; h: number; fan: number; fanDown: number; gap: number } {
   const cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
   const read = (name: string, fallback: number): number => {
@@ -326,15 +334,28 @@ function renderTableau(): void {
     piles.push(cards);
     sigs.push(pileSig(cards, fan + ':' + fanDown + ':' + h));
   }
-  if (root.children.length === 7 && sigs.every((s, i) => lastSig['tab' + i] === s)) return;
 
-  root.innerHTML = '';
+  const cols = Array.from(root.children) as any[];
+  const full = cols.length !== 7 || cols.some((c) => !c.classList?.contains?.('col'));
+  if (!full && sigs.every((s, i) => lastSig['tab' + i] === s)) return;
+  if (full) root.innerHTML = '';
+
   for (let i = 0; i < 7; i++) {
-    lastSig['tab' + i] = sigs[i];
     const cards = piles[i];
-    const col = document.createElement('div');
+    let col: any;
+    if (full) {
+      col = document.createElement('div');
+      col.className = 'col';
+      root.appendChild(col);
+    } else {
+      if (lastSig['tab' + i] === sigs[i]) continue;   // 这一列没变，保留原 DOM
+      col = root.children[i];
+      col.innerHTML = '';
+    }
+    lastSig['tab' + i] = sigs[i];
     col.className = 'col';
     col.dataset.col = String(i);
+
     const slot = document.createElement('div');
     slot.className = 'col-slot';
     col.appendChild(slot);
@@ -356,7 +377,6 @@ function renderTableau(): void {
     const columnHeight = cards.length ? y - lastStep + h : h;
     col.style.height = columnHeight + 'px';
     col.style.minHeight = columnHeight + 'px';
-    root.appendChild(col);
   }
 }
 
@@ -469,7 +489,7 @@ function pileFromElement(el: any): PileRef | null {
 }
 
 /** 从事件目标回溯出「被按住的那张牌」以及可移动的牌组 */
-function sourceAt(target: any, clientX: number, clientY: number): Source | null {
+function sourceAt(target: any): Source | null {
   const card = target?.closest?.('.card');
   if (card) {
     const pile = card.dataset.pile;
@@ -498,7 +518,7 @@ function sourceAt(target: any, clientX: number, clientY: number): Source | null 
 }
 
 /** 指针位置 → 目标牌堆（以元素命中为准，触摸也一样） */
-function dropTargetAt(x: number, y: number, src: Source): PileRef | null {
+function dropTargetAt(x: number, y: number): PileRef | null {
   const el = (document as any).elementFromPoint ? (document as any).elementFromPoint(x, y) : null;
   if (!el) return null;
   const pile = pileFromElement(el);
@@ -515,7 +535,7 @@ function onPointerDown(e: any): void {
   if (e.button !== undefined && e.button !== 0) return;
   closeMenu();
   const target = e.target;
-  const src = sourceAt(target, e.clientX, e.clientY);
+  const src = sourceAt(target);
   if (!src) {
     // 点牌库 → 翻牌
     const stock = target?.closest?.('.slot.stock');
@@ -560,7 +580,7 @@ function onPointerMove(e: any): void {
     beginDragVisual();
   }
   moveDragVisual(x, y);
-  highlightDrop(dropTargetAt(x, y, drag.source));
+  highlightDrop(dropTargetAt(x, y));
 }
 
 function onPointerUp(e: any): void {
@@ -594,7 +614,7 @@ function onPointerUp(e: any): void {
 
   // 拖动结束：落点合法就移动，否则回弹。
   // 落回原牌堆不是非法操作，应静默还原，不能弹「不能这样叠放」的 toast。
-  const dst = dropTargetAt(x, y, d.source);
+  const dst = dropTargetAt(x, y);
   clearDragVisual();
   clearDropHighlights();
   if (dst && sameLocation(d.source.loc, dst)) { render(); return; }
@@ -761,19 +781,6 @@ function resetHintHistory(): void {
   hintVisited = new Set<string>();
   hintVisibleVisited = new Set<string>();
   lastHintKey = null;
-}
-
-/** 记录当前提示状态；返回 false 表示回到了已经提示过的局面（循环）。 */
-function enterHintState(st: any): boolean {
-  const key = Solver.stateKey(st) as string;
-  if (key === lastHintKey) return true;       // 同一局面重复点提示，仍显示同一条建议
-  if (hintVisited.has(key)) {
-    toast('检测到提示循环：继续走会回到之前的局面。建议撤销或重新发牌。', 3000);
-    return false;
-  }
-  hintVisited.add(key);
-  lastHintKey = key;
-  return true;
 }
 
 /** 分析只记录新状态，不阻断分析；循环检测用于它内部的建议生成。 */
@@ -1006,6 +1013,9 @@ function winSequence(): void {
     layer.remove?.();
     const banner = document.createElement('div');
     banner.className = 'win-banner';
+    banner.setAttribute?.('role', 'dialog');
+    banner.setAttribute?.('aria-modal', 'true');
+    banner.setAttribute?.('aria-label', '你赢了');
     banner.innerHTML = '<h3>你赢了！</h3><p>用时 ' + engine.elapsed() + ' 秒 · ' + engine.moves + ' 步</p>';
     const btn = document.createElement('button');
     btn.className = 'btn';
@@ -1013,6 +1023,7 @@ function winSequence(): void {
     btn.addEventListener('click', () => newGame());
     banner.appendChild(btn);
     table.appendChild(banner);
+    btn.focus?.();
   }, 3400);
 }
 
@@ -1042,8 +1053,13 @@ function hideToast(): void {
 
 function closeMenu(): void {
   if (!menuOpen) return;
-  menuOpen.drop.hidden = true;
-  menuOpen.title.classList.remove('active');
+  const { drop, title } = menuOpen;
+  drop.hidden = true;
+  title.classList.remove('active');
+  title.setAttribute?.('aria-expanded', 'false');
+  // 键盘焦点还留在菜单里时，关闭后送回菜单标题，避免焦点落到隐藏节点。
+  const active = (document as any).activeElement;
+  if (active && drop.contains?.(active)) title.focus?.();
   menuOpen = null;
 }
 
@@ -1055,7 +1071,20 @@ function openMenuOf(menu: any): void {
   closeMenu();
   drop.hidden = false;
   title.classList.add('active');
+  title.setAttribute?.('aria-expanded', 'true');
   menuOpen = { menu, drop, title };
+  // 鼠标和键盘打开走同一路径；把焦点放进第一个菜单项，Tab/Enter 才能继续操作。
+  drop.querySelector?.('.mi')?.focus?.();
+}
+
+/** 在同一个下拉菜单里循环移动焦点（供键盘 ↑/↓ 使用）。 */
+function moveMenuFocus(current: any, delta: number): void {
+  const drop = current?.closest?.('.dropdown');
+  const items = (drop?.querySelectorAll?.('.mi') ?? []) as any[];
+  if (!items.length) return;
+  const idx = items.indexOf(current);
+  const next = items[(idx + delta + items.length) % items.length];
+  next?.focus?.();
 }
 
 function toggleMenuById(id: string): void {
@@ -1094,8 +1123,12 @@ function showPanel(title: string, subtitle: string, reasons: string[], buttons: 
   const table = tableEl();
   const panel = document.createElement('div');
   panel.className = 'info-banner';
+  panel.setAttribute?.('role', 'dialog');
+  panel.setAttribute?.('aria-modal', 'true');
   const h = document.createElement('h3');
+  h.id = 'panel-title';
   h.textContent = title;
+  panel.setAttribute?.('aria-labelledby', 'panel-title');
   panel.appendChild(h);
   const sub = document.createElement('p');
   sub.className = 'sub';
@@ -1125,6 +1158,7 @@ function showPanel(title: string, subtitle: string, reasons: string[], buttons: 
   }
   panel.appendChild(row);
   table.appendChild(panel);
+  (row.querySelector?.('.btn') as any)?.focus?.();
 }
 
 /** 走子后调用：真没得走了就直接告诉玩家，并说清楚为什么 */
@@ -1296,6 +1330,7 @@ function toggleMaximize(): void {
   const on = !isMaximized();
   w.classList.toggle('maximized', on);
   syncTitleButtons();
+  syncViewportWidth();
   // 牌宽由 CSS clamp 依据视口算出，切换后真实尺寸变了，必须清掉缓存重绘
   invalidateMetrics();
   invalidateRenderCache();
@@ -1314,7 +1349,7 @@ function toggleMinimize(): void {
   const on = !isMinimized();
   w.classList.toggle('minimized', on);
   syncTitleButtons();
-  if (!on) { invalidateMetrics(); invalidateRenderCache(); render(); }
+  if (!on) { syncViewportWidth(); invalidateMetrics(); invalidateRenderCache(); render(); }
 }
 
 /** 让按钮的图标/提示与当前状态一致 */
@@ -1365,6 +1400,31 @@ function bindEvents(): void {
       e.stopPropagation?.();
       openMenuOf(title.closest('.menu'));
     });
+    title.addEventListener('keydown', (e: any) => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+        e.preventDefault?.();
+        openMenuOf(title.closest('.menu'));
+      } else if (e.key === 'Escape') {
+        e.preventDefault?.();
+        closeMenu();
+      }
+    });
+  }
+  // 菜单项：Tab 可进入，Enter/Space 执行，↑/↓ 循环移动，Esc 关闭。
+  for (const mi of $$('.mi')) {
+    mi.addEventListener('keydown', (e: any) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault?.();
+        const act = mi.dataset.act;
+        if (act) onMenuItem(act);
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault?.();
+        moveMenuFocus(mi, e.key === 'ArrowDown' ? 1 : -1);
+      } else if (e.key === 'Escape') {
+        e.preventDefault?.();
+        closeMenu();
+      }
+    });
   }
   // 菜单项
   document.addEventListener('mousedown', (e: any) => {
@@ -1390,7 +1450,7 @@ function bindEvents(): void {
     if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); return; }
     if (e.altKey && k === 'g') { e.preventDefault(); toggleMenuById('menuGame'); return; }
     if (e.altKey && k === 'h') { e.preventDefault(); toggleMenuById('menuHelp'); return; }
-    if (e.key === 'Escape') { clearTransient(); closeMenu(); return; }
+    if (e.key === 'Escape') { clearPanel(); clearTransient(); closeMenu(); return; }
     // 单键快捷键必须是“裸键”：否则 Ctrl+F/Ctrl+A/Ctrl+H 等浏览器快捷键
     // 会被页面抢走；尤其原来无确认的 n 会直接把当前牌局重开。
     const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
@@ -1419,6 +1479,7 @@ function bindEvents(): void {
     closeMenu();
   });
   window.addEventListener('resize', () => {
+    syncViewportWidth();       // 滚动条出现/消失会改变 clientWidth
     invalidateMetrics();
     invalidateRenderCache();   // 牌宽/叠放比例变了，必须全量重绘
     render();
@@ -1431,6 +1492,7 @@ function init(): void {
   ledScore = makeLed($('#ledScore'));
   ledTime = makeLed($('#ledTime'));
   engine = new ENGINE(Math.random, undefined, 1);
+  syncViewportWidth();
   invalidateRenderCache();
   bindEvents();
   render();

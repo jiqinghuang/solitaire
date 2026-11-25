@@ -209,6 +209,7 @@ const documentStub: any = {
   },
   querySelectorAll: (sel: string) => {
     if (sel === '.menutitle') return [gameTitle, helpTitle];
+    if (sel === '.mi') return Object.values(miEls);
     if (sel === '.tbtn') return [tbtnMin, tbtnMax];
     if (sel === '.card.selected') {
       const out: StubEl[] = [];
@@ -463,6 +464,13 @@ section('U8 键盘快捷键', () => {
   ok(gameDrop.hidden === false, 'Alt+G 展开游戏菜单');
   keydown('Escape');
   ok(gameDrop.hidden === true, 'Esc 关闭菜单');
+
+  // 菜单项键盘操作：Alt+G 打开后，Enter 应执行当前菜单项。
+  clickCard(stockEl);
+  ok(U.engine().moves === 1, '前提：当前牌局有一步操作');
+  keydown('g', { altKey: true });
+  miEls['new'].fire('keydown', { key: 'Enter', preventDefault() { /* noop */ } });
+  ok(U.engine().moves === 0 && U.engine().stockCount === 24, '菜单项 Enter 可执行新游戏');
 });
 
 section('U9 胜利界面', () => {
@@ -620,6 +628,8 @@ section('U16b 翻牌/回收后进入死局也要弹面板', () => {
   ok(panels.length === 1, '翻牌后进入死局时弹出结论面板');
   ok((panels[0]?.querySelector('h3')?.textContent ?? '').includes('无法继续'),
     '面板标题说明局面已无法继续');
+  keydown('Escape');
+  ok(tableEl.querySelectorAll('.info-banner').length === 0, 'Esc 可以关闭结论面板');
 });
 
 section('U17 「分析局面」给出结论与原因', () => {
@@ -728,6 +738,7 @@ section('U19 渲染缓存：牌面变了就必须重绘', () => {
   const planted = SOL.Solitaire.planted({ tableau: [[['S', 13]], [['H', 12]], [], [], [], [], []] });
   U.setEngine(planted);
   ok(colCards(0).length === 1 && colCards(1).length === 1, '初始渲染正确');
+  const untouchedCol = colEl(2);
 
   // 移动后两列都必须更新（缓存不能把旧牌留在屏上）
   ok(U.engine().canMove({ kind: 'tableau', index: 1 }, 1, { kind: 'tableau', index: 0 }) === true,
@@ -736,6 +747,7 @@ section('U19 渲染缓存：牌面变了就必须重绘', () => {
     'tryMove 执行成功（注意第二个参数是 PileRef，不是 Source）');
   ok(U.engine().tableauCount(0) === 2 && U.engine().tableauCount(1) === 0, '引擎状态已变');
   ok(colCards(0).length === 2 && colCards(1).length === 0, '源列与目标列都重绘了（缓存没有卡住旧画面）');
+  ok(colEl(2) === untouchedCol, '未变化的列复用原 DOM 节点（增量渲染）');
 
   // 同一牌面反复 render 不能改变 DOM（缓存命中）
   const firstCard = colCard(0, 0);

@@ -27,7 +27,6 @@
     const isRed = (c) => c.suit === 'H' || c.suit === 'D';
     const rankLabel = (r) => RANK_LABEL[r] ?? '?';
     const suitLabel = (s) => SUIT_LABEL[s] ?? '?';
-    const foundationBase = (s) => SUITS.indexOf(s);
     function sameLocation(a, b) {
         if (a.kind !== b.kind)
             return false;
@@ -505,5 +504,5 @@
             return Math.min(MAX_SECONDS, Math.max(0, sec));
         }
     }
-    return { Solitaire: SolitaireImpl, SUITS, isRed, rankLabel, suitLabel, sameLocation, foundationBase };
+    return { Solitaire: SolitaireImpl, SUITS, isRed, rankLabel, suitLabel, sameLocation };
 });
